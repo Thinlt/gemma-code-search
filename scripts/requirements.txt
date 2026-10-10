@@ -1,0 +1,11 @@
+sentence-transformers>=3.0.0
+transformers>=4.45.0
+torch
+numpy
+tree-sitter>=0.22.0
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
+tree-sitter-go
+tree-sitter-rust
+tree-sitter-php
