@@ -2,9 +2,11 @@
 
 Semantic code search for coding agents (Cursor, Claude Code, Antigravity, …).
 
+> **Design intent (full write-up):** see **[DESIGN.md](./DESIGN.md)** (Tiếng Việt) — architecture, reindex policy, daemon, and rules for contributors.
+
 ## Features
 
-- Google **EmbeddingGemma-2** (text/code, ~270M with vision/audio off)
+- Google **EmbeddingGemma-2** (text/code, Matryoshka dims)
 - **Tree-sitter** AST chunking: Python, JS, JSX, TS, TSX, Go, Rust, PHP
 - **Shared daemon**: one model in RAM, auto-start, idle unload, short queue
 - **Incremental index**: by git commit; dirty/touched files under agent control
@@ -16,7 +18,6 @@ Semantic code search for coding agents (Cursor, Claude Code, Antigravity, …).
 cd embeddinggemma-code-search
 pip install -r scripts/requirements.txt
 
-# Point at your repo (or copy this skill into the repo)
 export CODE_DIR=/path/to/your/project
 export CODE_INDEX_DIR=/path/to/your/project/.code_index
 
@@ -38,7 +39,8 @@ need fresh semantics for edited files?
 
 ```text
 embeddinggemma-code-search/
-├── SKILL.md
+├── DESIGN.md           # ý đồ thiết kế (đọc trước khi phát triển tiếp)
+├── SKILL.md            # hướng dẫn agent
 ├── README.md
 └── scripts/
     ├── requirements.txt
@@ -48,6 +50,11 @@ embeddinggemma-code-search/
     ├── daemon.py
     └── client_ipc.py
 ```
+
+## Official location
+
+Canonical path: **`Thinlt/Grok` → `embeddinggemma-code-search/`**  
+(The old standalone `Thinlt/embeddinggemma-code-search` repo was removed.)
 
 ## License
 
