@@ -27,9 +27,15 @@ Semantic search over the codebase with:
 python scripts/search.py "your natural language query" --top-k 6
 ```
 
+Exhaustive listing of one topic — every matching chunk, no per-file cap (ranked recall, not a grep substitute):
+
+```bash
+python scripts/search.py "webhook retry" --top-k 100 --max-per-file 0 --json
+```
+
 This will:
 
-1. Run **commit-only** incremental reindex if `HEAD` moved
+1. Run **commit-only** incremental reindex if `HEAD` moved — never resumes an interrupted/partial build (it warns `[partial-index]` instead; resume is your explicit call)
 2. Auto-start the **daemon** if needed (first time loads the model)
 3. Search and print ranked function/class snippets
 4. Warn about **dirty files** not yet reindexed
@@ -53,9 +59,23 @@ python scripts/index.py
 # Also include uncommitted dirty files
 python scripts/index.py --working-tree
 
+# Index one subtree into the SHARED index (piece-by-piece, path identity is stable)
+python scripts/index.py --subdir services/api
+
+# Force re-embed a subtree only, keeping the rest of the shared index
+python scripts/index.py --subdir services/api --force
+
 # Full rebuild
 python scripts/index.py --force
 ```
+
+`--subdir` runs accumulate into one index: search covers everything indexed so far, and already-indexed files (matching file hash) are reused — not re-embedded — by later `--subdir` or full runs.
+
+### Crash-safe resume
+
+Indexing flushes a checkpoint every `EMBEDDINGGEMMA_CKPT_FILES` (default 100) files, each written atomically (tmp + rename) so Ctrl-C can never corrupt the index. If a run is killed (Ctrl-C, crash, reboot), rerun the **same command without `--force`** — it resumes from the last checkpoint instead of starting over.
+
+**Search never auto-resumes**: the auto-reindex before search covers committed changes only; while a build is half-done, search answers from what is indexed and prints a `[partial-index]` warning. Finish the build explicitly with `python scripts/index.py`.
 
 ### Daemon ops
 
@@ -91,6 +111,10 @@ Add `.code_index/` to `.gitignore`.
 | `CODE_DIR` | `.` | Repo root to index |
 | `CODE_INDEX_DIR` | `./.code_index` | Index storage |
 | `TRUNCATE_DIM` | `512` | 768 / 512 / 256 / 128 |
+| `EMBEDDINGGEMMA_MAX_SEQ_LEN` | `2048` | Max tokens per chunk fed to the embedder (crash guard) |
+| `EMBEDDINGGEMMA_CKPT_FILES` | `100` | Files per checkpoint flush during indexing |
+| `EMBEDDINGGEMMA_DEVICE` | `auto` | `cpu` / `mps` / `cuda`; auto = GPU if available, CPU fallback |
+| `EMBEDDINGGEMMA_MAX_PER_FILE` | `2` | Max chunks per file in top-k (0 = off); keeps one matching file from flooding results |
 | `EMBEDDINGGEMMA_IDLE_SEC` | `900` | Daemon idle unload |
 | `EMBEDDINGGEMMA_SOCK` | `/tmp/embeddinggemma.sock` | Unix socket path |
 | `EMBEDDINGGEMMA_QUEUE_MAX` | `24` | Max queued searches |

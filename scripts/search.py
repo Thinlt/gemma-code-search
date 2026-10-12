@@ -18,7 +18,11 @@ from pathlib import Path
 
 
 def run_index(code_dir: str, index_dir: str, dim: int, quiet: bool = True) -> None:
-    """Commit-only incremental reindex (default policy)."""
+    """Commit-only incremental reindex (default policy).
+
+    --commit-only keeps search fast: it never resumes a backlog of unindexed
+    files (e.g. an interrupted full build) — that stays an explicit index run.
+    """
     cmd = [
         sys.executable,
         str(Path(__file__).resolve().parent / "index.py"),
@@ -28,6 +32,7 @@ def run_index(code_dir: str, index_dir: str, dim: int, quiet: bool = True) -> No
         index_dir,
         "--dim",
         str(dim),
+        "--commit-only",
     ]
     if quiet:
         cmd.append("--quiet")
@@ -38,7 +43,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="EmbeddingGemma semantic code search")
     parser.add_argument("query", help="Natural language query")
     parser.add_argument("--top-k", type=int, default=6)
-    parser.add_argument("--min-score", type=float, default=0.12)
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=0.12,
+    )
+    parser.add_argument(
+        "--max-per-file",
+        type=int,
+        default=None,
+        help="Max chunks per file in top-k (0 = unlimited listing); overrides EMBEDDINGGEMMA_MAX_PER_FILE",
+    )
     parser.add_argument("--code-dir", default=os.getenv("CODE_DIR", "."))
     parser.add_argument("--index-dir", default=os.getenv("CODE_INDEX_DIR", "./.code_index"))
     parser.add_argument("--dim", type=int, default=int(os.getenv("TRUNCATE_DIM", "512")))
@@ -91,6 +106,7 @@ def main() -> None:
                 "top_k": args.top_k,
                 "min_score": args.min_score,
                 "dim": args.dim,
+                **({"max_per_file": args.max_per_file} if args.max_per_file is not None else {}),
             }
         )
         if args.json:
@@ -110,6 +126,8 @@ def main() -> None:
         "dim": args.dim,
         "format": "json" if args.json else "text",
     }
+    if args.max_per_file is not None:
+        req["max_per_file"] = args.max_per_file
     resp = send_request(req, auto_start=True, verbose=True)
 
     if args.json:

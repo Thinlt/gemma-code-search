@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from tree_sitter import Language, Node, Parser
 
@@ -105,6 +105,11 @@ TARGET_TYPES = {
     "mod_item",
     "trait_declaration",
 }
+
+# Keep chunks within the embedder's token budget (~1.5-2k tokens); whole-file
+# chunks (minified JS, template files, base64 assets) can otherwise request
+# 100+ GiB tensors inside the model and freeze the host.
+MAX_CHUNK_CHARS = 6000
 
 
 @dataclass
@@ -206,10 +211,50 @@ def _walk(
     return chunks
 
 
+def _split_oversized(chunks: List[CodeChunk]) -> List[CodeChunk]:
+    out: List[CodeChunk] = []
+    for c in chunks:
+        if len(c.content) <= MAX_CHUNK_CHARS:
+            out.append(c)
+            continue
+        parts = _content_parts(c.content)
+        total = len(parts)
+        for i, (text, line_offset) in enumerate(parts, 1):
+            out.append(
+                CodeChunk(
+                    path=c.path,
+                    name=f"{c.name} (part {i}/{total})",
+                    kind=c.kind,
+                    start_line=c.start_line + line_offset,
+                    end_line=c.start_line + line_offset + text.count("\n"),
+                    content=text,
+                    parent=c.parent,
+                    language=c.language,
+                )
+            )
+    return out
+
+
+def _content_parts(content: str) -> List[Tuple[str, int]]:
+    parts: List[Tuple[str, int]] = []
+    idx = 0
+    while idx < len(content):
+        end = min(idx + MAX_CHUNK_CHARS, len(content))
+        if end < len(content):
+            nl = content.find("\n", end)
+            # snap to the next line boundary only when it is close; a single long
+            # line (minified JS, base64) must be hard-cut instead of swallowed
+            if nl != -1 and nl - end <= MAX_CHUNK_CHARS // 6:
+                end = nl + 1
+        parts.append((content[idx:end], content.count("\n", 0, idx)))
+        idx = end
+    return parts
+
+
 def chunk_source(source: str, path: str, language: str) -> List[CodeChunk]:
     if language not in LANGUAGES:
         lines = source.count("\n") + 1
-        return [
+        chunks = [
             CodeChunk(
                 path=path,
                 name=Path(path).name,
@@ -220,6 +265,7 @@ def chunk_source(source: str, path: str, language: str) -> List[CodeChunk]:
                 language=language or "unknown",
             )
         ]
+        return _split_oversized(chunks)
 
     parser = Parser(LANGUAGES[language])
     src_bytes = bytes(source, "utf-8")
@@ -239,7 +285,7 @@ def chunk_source(source: str, path: str, language: str) -> List[CodeChunk]:
                 language=language,
             )
         ]
-    return chunks
+    return _split_oversized(chunks)
 
 
 def chunk_file(path: str, content: str) -> List[CodeChunk]:

@@ -49,10 +49,14 @@ Nếu index tự cập nhật mọi file vừa edit giữa multi-step reasoning,
 Mỗi lần search (mặc định):
   → Chỉ reindex incremental khi git HEAD (commit) tăng so với last_indexed_commit
   → KHÔNG auto-reindex file dirty / working tree / agent vừa chạm
+  → KHÔNG tự resume index dở dang (backlog file chưa có hash) — chỉ cảnh báo [partial-index]
 
 Agent muốn index đúng bản đang viết:
   → python scripts/index.py --paths <file1> <file2>
   → (tuỳ chọn) --working-tree nếu cần toàn bộ dirty
+
+Index dở dang (Ctrl-C giữa chừng):
+  → chạy lại python scripts/index.py (không --force) — resume từ checkpoint
 ```
 
 | Lớp | Nguồn chân lý | Ai cập nhật index |
@@ -170,7 +174,7 @@ python scripts/daemon.py --stop
 
 ## 5. Nguyên tắc không được phá khi phát triển tiếp
 
-1. **Không** mặc định reindex mọi thay đổi working tree khi search.  
+1. **Không** mặc định reindex mọi thay đổi working tree khi search, và **không** tự resume backlog index dở dang khi search.  
 2. **Không** coi snippet index là source of truth sau edit — skill instruction phải giữ.  
 3. **Không** bắt agent biết socket/daemon để search cơ bản.  
 4. **Giữ** chunk theo AST (function/class…), không quay lại chỉ-chunk-file nếu không có lý do mạnh.  

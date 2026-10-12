@@ -30,6 +30,7 @@ LOCK_FILE = os.getenv("EMBEDDINGGEMMA_LOCK", "/tmp/embeddinggemma.daemon.lock")
 IDLE_SEC = int(os.getenv("EMBEDDINGGEMMA_IDLE_SEC", "900"))
 QUEUE_MAX = int(os.getenv("EMBEDDINGGEMMA_QUEUE_MAX", "24"))
 INDEX_CACHE_MAX = int(os.getenv("EMBEDDINGGEMMA_INDEX_CACHE", "3"))
+MAX_PER_FILE = int(os.getenv("EMBEDDINGGEMMA_MAX_PER_FILE", "2"))
 TRUNCATE_DIM = int(os.getenv("TRUNCATE_DIM", "512"))
 HOST = os.getenv("EMBEDDINGGEMMA_HOST", "127.0.0.1")
 PORT = int(os.getenv("EMBEDDINGGEMMA_PORT", "8765"))
@@ -39,7 +40,7 @@ _model = None
 _last_active = time.time()
 _shutting_down = False
 _queue: Optional[asyncio.Queue] = None
-_index_cache: "OrderedDict[str, Tuple[List[Dict], np.ndarray, Dict]]" = OrderedDict()
+_index_cache: "OrderedDict[str, Tuple[List[Dict], np.ndarray, Dict, Tuple[int, int]]]" = OrderedDict()
 _dim = TRUNCATE_DIM
 
 
@@ -72,16 +73,20 @@ def load_model():
 
 def get_index(index_dir: str) -> Tuple[List[Dict], np.ndarray, Dict]:
     index_dir = str(Path(index_dir).resolve())
-    if index_dir in _index_cache:
-        _index_cache.move_to_end(index_dir)
-        return _index_cache[index_dir]
-
     docs_path = Path(index_dir) / "documents.pkl"
     emb_path = Path(index_dir) / "embeddings.npy"
     meta_path = Path(index_dir) / "meta.json"
 
     if not docs_path.exists() or not emb_path.exists():
         raise FileNotFoundError(f"Index missing under {index_dir}")
+
+    # signature of the data files: a checkpoint flush while the daemon is alive
+    # must swap the cached snapshot without needing a restart
+    sig = (docs_path.stat().st_mtime_ns, emb_path.stat().st_mtime_ns)
+    cached = _index_cache.get(index_dir)
+    if cached is not None and cached[3] == sig:
+        _index_cache.move_to_end(index_dir)
+        return cached[0], cached[1], cached[2]
 
     with open(docs_path, "rb") as f:
         documents = pickle.load(f)
@@ -91,7 +96,7 @@ def get_index(index_dir: str) -> Tuple[List[Dict], np.ndarray, Dict]:
         with open(meta_path) as f:
             meta = json.load(f)
 
-    _index_cache[index_dir] = (documents, embeddings, meta)
+    _index_cache[index_dir] = (documents, embeddings, meta, sig)
     while len(_index_cache) > INDEX_CACHE_MAX:
         _index_cache.popitem(last=False)
     return documents, embeddings, meta
@@ -124,13 +129,30 @@ def do_search(req: Dict[str, Any]) -> Dict[str, Any]:
         query, prompt_name="CodeRetrieval", truncate_dim=dim, normalize_embeddings=True
     )
     scores = np.dot(embeddings, q_emb)
-    top_idx = np.argsort(scores)[::-1][:top_k]
+    top_idx = np.argsort(scores)[::-1]
+
+    # diversity: without a per-file cap, one file whose many chunks all match
+    # (e.g. an API client for exactly this query) floods the whole top-k and
+    # pushes every other relevant file out of view
+    max_per_file = int(req.get("max_per_file", MAX_PER_FILE))
+    scan_limit = max(top_k * 20, 100)
+    per_file: Dict[str, int] = {}
+    picked: List[int] = []
+    for idx in top_idx[:scan_limit]:
+        score = float(scores[int(idx)])
+        if score < min_score:
+            break  # scores are descending: no later candidate can pass
+        path = documents[int(idx)].get("path") or ""
+        if max_per_file > 0 and per_file.get(path, 0) >= max_per_file:
+            continue
+        per_file[path] = per_file.get(path, 0) + 1
+        picked.append(int(idx))
+        if len(picked) >= top_k:
+            break
 
     results = []
-    for idx in top_idx:
+    for idx in picked:
         score = float(scores[idx])
-        if score < min_score:
-            continue
         doc = documents[int(idx)]
         results.append({
             "path": doc.get("path"),
