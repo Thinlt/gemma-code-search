@@ -125,13 +125,14 @@ class CodeChunk:
 
     @property
     def full_text(self) -> str:
+        # no `file:` segment: path tokens drag near-duplicate files (122 template
+        # near-copies) apart in vector space and block embedding-cache reuse, while
+        # carrying no meaning a query would use — the path still reaches search via
+        # BM25 and the stored "path" key. Bump TEXT_FORMAT in index.py when changing.
         title = f"{self.kind}: {self.name}"
         if self.parent:
             title = f"{self.kind}: {self.parent}.{self.name}"
-        return (
-            f"title: {title} | file: {self.path} | "
-            f"lang: {self.language} | text: {self.content}"
-        )
+        return f"title: {title} | lang: {self.language} | text: {self.content}"
 
     def to_dict(self) -> Dict[str, Any]:
         return {

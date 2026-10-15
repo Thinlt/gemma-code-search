@@ -11,6 +11,8 @@ Semantic search over the codebase with:
 - Languages: **Python, JavaScript, JSX, TypeScript, TSX, Go, Rust, PHP** (+ markdown fallback)
 - **Shared daemon**: model loaded once in RAM; auto-start on first search; idle unload
 - **Reindex policy**: on search, only update when **git commit** advances; **dirty/touched files are not auto-reindexed** — you control when to refresh them
+- **.gitignore-aware**: files excluded by git ignore rules (nested `.gitignore`, `.git/info/exclude`, negation, `**`; tracked files are never excluded) are skipped, and pruned from the index on the next persist (`--paths` cannot re-add an ignored file)
+- **Hybrid BM25 + dense**: exact symbol/name matches (camelCase-aware BM25) are fused with semantic ranking (RRF) — better recall when the query names a symbol. Disable per-query with `--no-bm25`
 
 ## When to use
 
@@ -32,6 +34,16 @@ Exhaustive listing of one topic — every matching chunk, no per-file cap (ranke
 ```bash
 python scripts/search.py "webhook retry" --top-k 100 --max-per-file 0 --json
 ```
+
+Pure semantic ranking (no BM25 fusion) when you want dense-only behavior:
+
+```bash
+python scripts/search.py "webhook retry" --no-bm25
+```
+
+**Encoder consistency**: the index records which encoder built it (`meta.json` → `encoder`). If queries come from a different one (e.g. index built with torch fp32, queries with the ONNX int8 backend), cosine scores are not comparable — search prints a `_encoder mismatch_` warning; rebuild with `python scripts/index.py --force` after switching backends.
+
+**Index format versioning**: `meta.json` also records the chunk text format (`text_format`). After a skill update that changes it, search prints `[error] … full rebuild first` (the auto-reindex refuses to run) but still answers from the old index; `--paths`/`--subdir` updates are likewise refused. Run `python scripts/index.py --force` **once** to migrate — a plain `index.py` run also migrates automatically by rebuilding from scratch.
 
 This will:
 
@@ -77,6 +89,15 @@ Indexing flushes a checkpoint every `EMBEDDINGGEMMA_CKPT_FILES` (default 100) fi
 
 **Search never auto-resumes**: the auto-reindex before search covers committed changes only; while a build is half-done, search answers from what is indexed and prints a `[partial-index]` warning. Finish the build explicitly with `python scripts/index.py`.
 
+**Graceful stop (`q`)**: while indexing in a terminal, press `q` — the in-flight sub-batch is finished, a checkpoint is saved, and the process exits `0` (a stop, **not** a crash/error). Rerun the same command to resume from the checkpoint. Non-TTY runs (pipes, CI, agent shells) are unaffected.
+
+**Progress display**: each file is shown live as it is indexed, compacted to
+`<dir1>/<dir2>/...<parent ≤10 chars>/<file ≤32 chars>` — e.g. `services/api/...controller/AuthController.php` (2 root dir levels, collapsed middle levels, immediate parent dir — only when it differs from the level-2 dir — and the file name, tail-kept with a `...` prefix when longer than 32 chars). The most recent file line stays visible above each `[embed]` line (chunking runs far ahead of embedding, so a wiped line would flash for <1s and never be readable). TTY only — non-interactive runs (pipes, CI, agent shells) print the `[embed]`/`[ckpt]` lines only.
+
+**Embedding feedback**: embedding runs in sub-batches of 64 chunks that take tens of seconds with no per-file movement — each one prints `  [embed] N chunks (R reused, M new) ... done Xs (Y ch/s new)` so the silent stretches (especially the first, right after `Model ready on ...`) are visibly working, not hung.
+
+**Embedding cache**: chunk embeddings are content-addressed (sha1 of the embedded text, encoder-matched). Re-indexing an edited file embeds only the chunks whose text actually changed; reruns after `q` and regenerated-but-identical files are free. Vectors from a different encoder (torch fp32 vs ONNX int8) are never reused.
+
 ### Daemon ops
 
 ```bash
@@ -104,6 +125,18 @@ python scripts/search.py "test query"
 
 Add `.code_index/` to `.gitignore`.
 
+### Optional: int8 ONNX backend (CPU-only machines)
+
+The default backend is **torch** (GPU when available). An int8-quantized ONNX replica of the same pipeline exists for machines without a usable GPU — it uses less RAM and no torch dependency at search time:
+
+```bash
+pip install onnxruntime onnx onnxscript
+python scripts/export_onnx.py        # export → quantize → validate vs fp32 (gates: mean cos ≥ 0.97)
+EMBEDDINGGEMMA_BACKEND=onnx python scripts/search.py "query"
+```
+
+Measured on M2 Pro: int8 ONNX (CPU EP) is ~2.5x **slower** than torch fp32 on MPS — keep the torch default on GPU machines. The bundle lands in `models/embeddinggemma2-int8/` (gitignored) and activates only via `EMBEDDINGGEMMA_BACKEND=onnx`.
+
 ## Environment (optional)
 
 | Variable | Default | Meaning |
@@ -113,7 +146,11 @@ Add `.code_index/` to `.gitignore`.
 | `TRUNCATE_DIM` | `512` | 768 / 512 / 256 / 128 |
 | `EMBEDDINGGEMMA_MAX_SEQ_LEN` | `2048` | Max tokens per chunk fed to the embedder (crash guard) |
 | `EMBEDDINGGEMMA_CKPT_FILES` | `100` | Files per checkpoint flush during indexing |
+| `EMBEDDINGGEMMA_BATCH_SIZE` | `4` | Embed batch size (measured fastest on M2 Pro under load; try `8`/`16` when the machine is idle) |
+| `EMBEDDINGGEMMA_DTYPE` | `auto` | `fp32` / `bf16` / `fp16`; auto = bf16 on CUDA, fp32 on MPS/cpu (measured: bf16 slower via Metal, fp16 gives NaN on Gemma) |
 | `EMBEDDINGGEMMA_DEVICE` | `auto` | `cpu` / `mps` / `cuda`; auto = GPU if available, CPU fallback |
+| `EMBEDDINGGEMMA_BACKEND` | `torch` | `torch` / `onnx` — onnx needs the exported int8 bundle (see Setup); torch measured faster on GPU machines |
+| `EMBEDDINGGEMMA_ONNX_EP` | `auto` | ONNX execution provider; default CPU EP (CoreML partitions this graph heavily — set `coreml` only after measuring) |
 | `EMBEDDINGGEMMA_MAX_PER_FILE` | `2` | Max chunks per file in top-k (0 = off); keeps one matching file from flooding results |
 | `EMBEDDINGGEMMA_IDLE_SEC` | `900` | Daemon idle unload |
 | `EMBEDDINGGEMMA_SOCK` | `/tmp/embeddinggemma.sock` | Unix socket path |

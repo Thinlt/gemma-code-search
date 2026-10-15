@@ -72,6 +72,11 @@ def main() -> None:
         action="store_true",
         help="Force local in-process model (slow, no shared daemon)",
     )
+    parser.add_argument(
+        "--no-bm25",
+        action="store_true",
+        help="Disable BM25+dense hybrid fusion (dense cosine only)",
+    )
     args = parser.parse_args()
 
     code_dir = str(Path(args.code_dir).resolve())
@@ -106,6 +111,7 @@ def main() -> None:
                 "top_k": args.top_k,
                 "min_score": args.min_score,
                 "dim": args.dim,
+                "hybrid": not args.no_bm25,
                 **({"max_per_file": args.max_per_file} if args.max_per_file is not None else {}),
             }
         )
@@ -124,6 +130,7 @@ def main() -> None:
         "top_k": args.top_k,
         "min_score": args.min_score,
         "dim": args.dim,
+        "hybrid": not args.no_bm25,
         "format": "json" if args.json else "text",
     }
     if args.max_per_file is not None:

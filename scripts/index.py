@@ -11,28 +11,44 @@ Policy:
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
 import pickle
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer
+from transformers import logging as hf_logging
+
+hf_logging.disable_progress_bar()  # drop the "Loading weights" bar — noise in terminals and agent shells
 
 from chunker import EXT_TO_LANG, CodeChunk, chunk_file
+from onnx_embedder import encoder_id
 
 SUPPORTED_EXTS = set(EXT_TO_LANG.keys()) | {".md"}
 # Embedder input cap in tokens. The model's tokenizer reports model_max_length=1e18,
 # so without an explicit cap one long chunk can request 100+ GiB tensors.
 MAX_SEQ_LEN = int(os.getenv("EMBEDDINGGEMMA_MAX_SEQ_LEN", "2048"))
-BATCH_SIZE = 8
+BATCH_SIZE = int(os.getenv("EMBEDDINGGEMMA_BATCH_SIZE", "4"))
 CHECKPOINT_FILES = int(os.getenv("EMBEDDINGGEMMA_CKPT_FILES", "100"))
+EMBED_SUBBATCH = 64  # chunks per encode call — also the granularity of a graceful 'q' stop
+# Version of the embedded string format (what CodeChunk.full_text produces).
+# 1 = "title|file|lang|text" (path included), 2 = path dropped. Old vectors embed a
+# different string, so an index from another format can only be rebuilt, never merged.
+TEXT_FORMAT = 2
+DISPLAY_DIR_LEVELS = 2
+DISPLAY_DIR_MAX = 10
+DISPLAY_FILE_MAX = 32
 DEVICE_ENV = os.getenv("EMBEDDINGGEMMA_DEVICE", "auto").lower()
+DTYPE_ENV = os.getenv("EMBEDDINGGEMMA_DTYPE", "auto").lower()
 SKIP_DIRS = {
     ".git", "node_modules", "__pycache__", ".venv", "venv",
     "dist", "build", ".code_index", "vendor", "target",
@@ -105,6 +121,155 @@ def subdir_scope(subdir: str, all_files: Dict[str, Path]) -> Set[str]:
     return {p for p in all_files if p == sub or p.startswith(sub + "/")}
 
 
+def run_git_stdin(cmd: List[str], cwd: str, input_text: str) -> str:
+    try:
+        r = subprocess.run(["git"] + cmd, cwd=cwd, input=input_text, capture_output=True, text=True)
+        return r.stdout
+    except Exception:
+        return ""
+
+
+def governing_repos(code_dir: str, files: Dict[str, Path]) -> Dict[str, str]:
+    """rel path → nearest git repo root at/above the file ('' when none). Cached per directory."""
+    cache: Dict[str, str] = {}
+    out: Dict[str, str] = {}
+    for rel in files:
+        d = str(Path(rel).parent)
+        if d not in cache:
+            cur = Path(code_dir, d).resolve()
+            cache[d] = next((str(a) for a in (cur, *cur.parents) if (a / ".git").exists()), "")
+        out[rel] = cache[d]
+    return out
+
+
+def gitignore_excluded(code_dir: str, files: Dict[str, Path]) -> Set[str]:
+    """Rel paths excluded by .gitignore rules with full git semantics (nested
+    .gitignore, .git/info/exclude, negation, '**'); tracked files are never
+    excluded. Empty set when git or a repo is unavailable — non-git dirs are
+    left untouched by design."""
+    by_repo: Dict[str, List[str]] = {}
+    for rel, repo in governing_repos(code_dir, files).items():
+        if repo:
+            by_repo.setdefault(repo, []).append(rel)
+    if not by_repo:
+        return set()
+
+    excluded: Set[str] = set()
+    code_p = Path(code_dir)
+    for repo, rels in sorted(by_repo.items()):
+        repo_p = Path(repo)
+        if repo_p == code_p or repo_p in code_p.parents:
+            # repo at/above the code dir: file paths sit under a prefix relative to the repo
+            prefix = os.path.relpath(code_dir, repo).replace(os.sep, "/")
+            to_repo = (lambda p: p) if prefix == "." else (lambda p: f"{prefix}/{p}")
+            from_repo = (lambda r: r) if prefix == "." else (lambda r: r[len(prefix) + 1:])
+        else:
+            # nested repo below the code dir: strip its own prefix instead
+            prefix = os.path.relpath(repo, code_dir).replace(os.sep, "/")
+            to_repo = lambda p: p[len(prefix) + 1:] if p.startswith(prefix + "/") else p
+            from_repo = lambda r: f"{prefix}/{r}"
+        tracked = {t for t in run_git(["ls-files", "--cached", "-z"], repo).split("\0") if t}
+        out = run_git_stdin(["check-ignore", "-z", "--stdin"], repo, "\0".join(to_repo(p) for p in rels))
+        for line in out.split("\0"):
+            line = line.strip()
+            if line and line not in tracked:
+                excluded.add(from_repo(line))
+    return excluded
+
+
+def display_path(rel: str) -> str:
+    """Compact one-line progress label: first 2 directory levels, then the
+    immediate parent dir (max 10 chars, behind a '...' collapse marker when it
+    differs from the level-2 dir), then the file name (max 32 chars, tail-kept
+    when truncated). E.g.
+    services/api/handlers/v2/controllers/AuthController.php
+      → services/api/...controller/AuthController.php
+    """
+    parts = rel.replace("\\", "/").split("/")
+    dirs, fname = parts[:-1], parts[-1]
+    shown = dirs[:DISPLAY_DIR_LEVELS]
+    if len(dirs) > DISPLAY_DIR_LEVELS:
+        parent = dirs[-1]
+        if parent != dirs[DISPLAY_DIR_LEVELS - 1]:
+            shown.append("..." + parent[:DISPLAY_DIR_MAX])
+        else:
+            shown.append("...")
+    if len(fname) > DISPLAY_FILE_MAX:
+        fname = "..." + fname[-(DISPLAY_FILE_MAX - 3):]
+    return "/".join(shown + [fname])
+
+
+_stop_requested = False
+
+
+def request_stop() -> None:
+    global _stop_requested
+    _stop_requested = True
+
+
+def start_stop_listener() -> Optional[Callable[[], None]]:
+    """Watch the terminal for a 'q' keypress and request a graceful stop.
+
+    Active only when stdin is a TTY — non-interactive runs (pipes, CI, agent
+    shells) are untouched. Returns a restore() that puts the terminal back to
+    cooked mode, or None when no listener was started.
+    """
+    if not sys.stdin.isatty():
+        return None
+    try:
+        import termios
+        import tty
+    except ImportError:
+        termios = None
+        try:
+            import msvcrt
+        except ImportError:
+            return None
+    else:
+        msvcrt = None
+
+    fd = sys.stdin.fileno()
+    saved = None
+    if termios is not None:
+        try:
+            saved = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+        except Exception:
+            return None
+
+    def _watch() -> None:
+        try:
+            if msvcrt is not None:
+                while not _stop_requested:
+                    if msvcrt.kbhit():
+                        if msvcrt.getwch().lower() == "q":
+                            request_stop()
+                            break
+                    time.sleep(0.05)
+            else:
+                while not _stop_requested:
+                    ch = sys.stdin.read(1)
+                    if not ch:  # EOF (pty closed)
+                        break
+                    if ch.lower() == "q":
+                        request_stop()
+                        break
+        except Exception:
+            pass
+
+    threading.Thread(target=_watch, daemon=True).start()
+
+    def _restore() -> None:
+        if saved is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            except Exception:
+                pass
+
+    atexit.register(_restore)
+    return _restore
+
+
 def resolve_device() -> str:
     if DEVICE_ENV not in ("auto", ""):
         return DEVICE_ENV
@@ -118,28 +283,91 @@ def resolve_device() -> str:
     return "cpu"
 
 
+def resolve_dtype(device: str):
+    """fp32/bf16/fp16 override via EMBEDDINGGEMMA_DTYPE; auto keeps CUDA bf16 but
+    stays fp32 on MPS/cpu — measured on M2 Pro: bf16 is ~18% slower through Metal
+    and fp16 yields non-finite embeddings (Gemma activation overflow)."""
+    d = DTYPE_ENV
+    if d in ("fp32", "float32", "float"):
+        return torch.float32
+    if d in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if d in ("fp16", "float16", "half"):
+        return torch.float16
+    if device == "cuda":
+        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
+    return torch.float32
+
+
+def resolve_backend() -> str:
+    """EMBEDDINGGEMMA_BACKEND=torch (default) | onnx. The int8 ONNX bundle must be
+    asked for explicitly: measured on M2 Pro it is slower than torch fp32 MPS; it
+    earns its keep on CPU-only machines."""
+    b = os.getenv("EMBEDDINGGEMMA_BACKEND", "torch").lower()
+    if b in ("", "auto", "torch"):
+        return "torch"
+    if b == "onnx":
+        from onnx_embedder import bundle_available
+
+        if not bundle_available():
+            raise SystemExit(
+                "[error] EMBEDDINGGEMMA_BACKEND=onnx but no bundle — "
+                "run: python scripts/export_onnx.py"
+            )
+        return "onnx"
+    return "torch"
+
+
 def load_model(dim: int) -> SentenceTransformer:
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
-    device = resolve_device()
-    model = SentenceTransformer(
-        "google/embeddinggemma-2",
-        device=device,
-        model_kwargs={"torch_dtype": dtype},
-        config_kwargs={"vision_config": None, "audio_config": None},
-    )
-    model.max_seq_length = MAX_SEQ_LEN
-    if device != "cpu":
-        # gpu self-check: cheap encode; fall back to cpu on error or non-finite output
+    if resolve_backend() == "onnx":
+        from onnx_embedder import OnnxEmbedder
+
+        model = OnnxEmbedder()
         try:
             probe = model.encode(
                 ["probe"], prompt_name="Document", truncate_dim=dim,
+                normalize_embeddings=True, batch_size=1,
+            )
+            if np.isfinite(probe).all():
+                print(f"[model] backend=onnx int8 ep={model.provider}")
+                return model
+            print("[warn] onnx int8 non-finite probe; falling back to torch")
+        except Exception as e:
+            print(f"[warn] onnx backend failed ({e}); falling back to torch")
+
+    device = resolve_device()
+
+    def build(dev: str, dtype) -> SentenceTransformer:
+        m = SentenceTransformer(
+            "google/embeddinggemma-2",
+            device=dev,
+            model_kwargs={"torch_dtype": dtype},
+            config_kwargs={"vision_config": None, "audio_config": None},
+        )
+        m.max_seq_length = MAX_SEQ_LEN
+        return m
+
+    def self_check(m: SentenceTransformer) -> bool:
+        # cheap encode; catches dtype/device failures and non-finite output
+        if m.device.type == "cpu":
+            return True
+        try:
+            probe = m.encode(
+                ["probe"], prompt_name="Document", truncate_dim=dim,
                 normalize_embeddings=True, show_progress_bar=False, batch_size=1,
             )
-            if not np.isfinite(probe).all():
-                raise RuntimeError("non-finite embeddings")
+            return bool(np.isfinite(probe).all())
         except Exception as e:
-            print(f"[warn] device {device} failed self-check ({e}); using cpu")
-            model.to("cpu")
+            print(f"[warn] device {m.device.type} self-check failed ({e})")
+            return False
+
+    model = build(device, resolve_dtype(device))
+    if not self_check(model):
+        model = build(device, torch.float32)
+        if not self_check(model):
+            print(f"[warn] device {device} failed self-check; using cpu")
+            model = build("cpu", torch.float32)
+    print(f"[model] device={model.device.type} dtype={next(model.parameters()).dtype}")
     return model
 
 
@@ -149,7 +377,7 @@ def embed_chunks(model: SentenceTransformer, chunks: List[CodeChunk], dim: int) 
     texts = [c.full_text for c in chunks]
     emb = model.encode(
         texts, prompt_name="Document", truncate_dim=dim,
-        normalize_embeddings=True, show_progress_bar=True, batch_size=BATCH_SIZE,
+        normalize_embeddings=True, show_progress_bar=False, batch_size=BATCH_SIZE,
     )
     return np.array(emb, dtype=np.float32)
 
@@ -175,7 +403,15 @@ def main() -> None:
     parser.add_argument("--dim", type=int, default=int(os.getenv("TRUNCATE_DIM", "512")))
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+    restore_term = start_stop_listener()
+    try:
+        _run(args)
+    finally:
+        if restore_term is not None:
+            restore_term()
 
+
+def _run(args: argparse.Namespace) -> None:
     code_dir = str(Path(args.code_dir).resolve())
     index_dir = Path(args.index_dir).resolve()
     index_dir.mkdir(parents=True, exist_ok=True)
@@ -197,14 +433,36 @@ def main() -> None:
         if old_embs.shape[0] != len(old_docs):
             # crash between the two index writes; the docs file is authoritative
             old_embs = old_embs[: len(old_docs)]
+        incompatible = None
         if meta.get("dim") != args.dim:
-            # embedding width changed; stale vectors cannot be merged — rebuild
+            incompatible = f"embedding dim {meta.get('dim')} != {args.dim} (TRUNCATE_DIM changed)"
+        elif meta.get("text_format") != TEXT_FORMAT:
+            incompatible = (
+                f"chunk text format {meta.get('text_format') or 1} != {TEXT_FORMAT} "
+                "(embedded strings changed)"
+            )
+        if incompatible:
+            if args.paths is not None or args.subdir or args.commit_only:
+                # scoped/incremental updates would merge incompatible vectors into a
+                # mixed index (or shrink it to the scope) — only a full rebuild is safe
+                sys.exit(
+                    f"[error] {incompatible}; cannot update this index in place — "
+                    "full rebuild first: python scripts/index.py --force"
+                )
+            # stale vectors cannot be merged with new ones — rebuild from scratch
+            print(f"[index-format] {incompatible} — rebuilding from scratch")
             meta, old_docs, old_embs = {}, [], None
 
     last_commit = meta.get("last_commit", "")
     file_hashes: Dict[str, str] = dict(meta.get("file_hashes", {}))
     current_commit = get_current_commit(code_dir)
     all_files = collect_files(code_dir)
+    excluded = gitignore_excluded(code_dir, all_files)
+    if excluded:
+        for p in excluded:
+            all_files.pop(p, None)
+        if not args.quiet:
+            print(f"[gitignore] skipping {len(excluded)} file(s) matched by .gitignore rules")
     scope: Set[str] = subdir_scope(args.subdir, all_files) if args.subdir else set()
     if args.subdir and not scope:
         if not args.quiet:
@@ -312,9 +570,12 @@ def main() -> None:
                         "last_commit": current_commit,
                         "file_hashes": new_hashes,
                         "dim": args.dim,
+                        "text_format": TEXT_FORMAT,
                         "num_chunks": len(docs),
                         "num_files": len(all_files),
                         "dirty_at_index": dirty_now,
+                        # who embedded this index — search warns on mismatch (fp32 vs int8)
+                        "encoder": encoder_used or meta.get("encoder", ""),
                     },
                     indent=2,
                 ).encode("utf-8")
@@ -323,40 +584,153 @@ def main() -> None:
 
     groups = [to_process[i : i + CHECKPOINT_FILES] for i in range(0, len(to_process), CHECKPOINT_FILES)]
     model: Optional[SentenceTransformer] = None
+    encoder_used: Optional[str] = None
     final_docs: List[Dict] = list(kept_docs)
     emb_parts: List[np.ndarray] = list(kept_embs)
+    pending_hashes: Dict[str, str] = {}  # chunked but not yet embedded; confirmed into new_hashes on flush
+    interactive = not args.quiet and sys.stdout.isatty()
+    progress_open = False
+    done_count = 0
 
+    def close_progress() -> None:
+        nonlocal progress_open
+        if progress_open:
+            # newline keeps the last indexed file visible above each [embed] line —
+            # wiping it made file names flash for <1s between embeds (chunking is
+            # ~100x faster than embedding), so the ticker looked like it never ran
+            print(flush=True)
+            progress_open = False
+
+    def show_progress(rel: str) -> None:
+        nonlocal progress_open, done_count
+        done_count += 1
+        if not interactive:
+            return
+        line = f"  [{done_count}/{len(to_process)}] {display_path(rel)}"
+        print(("\r" + line[:118]).ljust(119), end="", flush=True)
+        progress_open = True
+
+    # content-addressed embedding cache: sha1(full_text) -> vector. Embedding is a
+    # pure function of (text, encoder), so identical chunks — same file edited in
+    # one place, re-runs after 'q', regenerated files — reuse the old vector
+    # instead of paying GPU time again. Skipped when the index was built by a
+    # different encoder (fp32 vs int8 vectors are not interchangeable).
+    emb_cache: Dict[str, np.ndarray] = {}
+
+    def prime_cache() -> None:
+        if old_embs is None or not old_docs:
+            return
+        if meta.get("encoder") != encoder_used:
+            return
+        for d, row in zip(old_docs, old_embs):
+            ft = d.get("full_text")
+            if ft:
+                emb_cache.setdefault(hashlib.sha1(ft.encode()).hexdigest(), row)
+
+    def flush(pending_chunks: List[CodeChunk], pending_rels: List[str]) -> None:
+        nonlocal model, encoder_used
+        close_progress()
+        if pending_chunks:
+            if model is None:
+                if not args.quiet:
+                    print("Loading EmbeddingGemma-2 for indexing...")
+                model = load_model(args.dim)
+                encoder_used = encoder_id(model, args.dim)
+                if not args.quiet:
+                    print(f"Model ready on {model.device.type}")
+                prime_cache()
+            # label the silent stretch: embedding a sub-batch takes tens of seconds
+            # with zero output otherwise, which reads as a hang right after "Model ready"
+            t0 = time.time()
+            rows: List[Optional[np.ndarray]] = []
+            todo: List[int] = []
+            hashes: List[str] = []
+            for i, c in enumerate(pending_chunks):
+                h = hashlib.sha1(c.full_text.encode()).hexdigest()
+                hashes.append(h)
+                v = emb_cache.get(h)
+                if v is not None:
+                    rows.append(v)
+                else:
+                    rows.append(None)
+                    todo.append(i)
+            if todo:
+                emb_new = np.asarray(
+                    embed_chunks(model, [pending_chunks[i] for i in todo], args.dim),
+                    dtype=np.float32,
+                )
+                for j, i in enumerate(todo):
+                    rows[i] = emb_new[j]
+                    emb_cache[hashes[i]] = emb_new[j]
+            new = len(todo)
+            reused = len(pending_chunks) - new
+            if not args.quiet:
+                extra = f" ({reused} reused, {new} new)" if reused else ""
+                print(f"  [embed] {len(pending_chunks)} chunks{extra} ...", end="", flush=True)
+            emb_parts.append(np.asarray(rows, dtype=np.float32))
+            final_docs.extend(c.to_dict() for c in pending_chunks)
+            if not args.quiet:
+                dt = time.time() - t0
+                rate = f"{new / dt:.1f} ch/s new" if new else "all reused"
+                print(f" done {dt:.0f}s ({rate})")
+        for rel in pending_rels:
+            if rel in pending_hashes:
+                new_hashes[rel] = pending_hashes.pop(rel)
+
+    if groups and sys.stdin.isatty() and not args.quiet:
+        print(f"Indexing {len(to_process)} file(s) — press 'q' to stop and save progress.")
+
+    stopped = False
     for gi, group in enumerate(groups, 1):
-        group_chunks: List[CodeChunk] = []
+        if _stop_requested:
+            stopped = True
+            break
+        pending_chunks: List[CodeChunk] = []
+        pending_rels: List[str] = []
         for rel in group:
+            if _stop_requested:
+                break
             path = all_files[rel]
             try:
                 content = path.read_text(encoding="utf-8", errors="ignore")
                 if len(content) > 120_000:
                     content = content[:120_000]
-                group_chunks.extend(chunk_file(rel, content))
-                new_hashes[rel] = file_hash(path)
+                pending_chunks.extend(chunk_file(rel, content))
+                pending_hashes[rel] = file_hash(path)
+                pending_rels.append(rel)
             except Exception as e:
                 if not args.quiet:
+                    close_progress()
                     print(f"  skip {rel}: {e}")
-
-        if group_chunks:
-            if model is None:
-                if not args.quiet:
-                    print("Loading EmbeddingGemma-2 for indexing...")
-                model = load_model(args.dim)
-                if not args.quiet:
-                    print(f"Model ready on {model.device}")
-            emb_parts.append(np.asarray(embed_chunks(model, group_chunks, args.dim), dtype=np.float32))
-            final_docs.extend(c.to_dict() for c in group_chunks)
-
+            show_progress(rel)
+            if len(pending_chunks) >= EMBED_SUBBATCH:
+                flush(pending_chunks, pending_rels)
+                pending_chunks, pending_rels = [], []
+                if _stop_requested:
+                    break
+        if pending_rels:
+            # finish and save whatever is in flight — this is also the graceful-stop
+            # path: files currently being indexed are saved before we stop
+            flush(pending_chunks, pending_rels)
         persist(final_docs, np.vstack(emb_parts) if emb_parts else np.zeros((0, args.dim), dtype=np.float32))
         if not args.quiet:
+            close_progress()
             print(f"[ckpt {gi}/{len(groups)}] chunks={len(final_docs)} files_hashed={len(new_hashes)}")
+        if _stop_requested:
+            stopped = True
+            break
 
     if not groups:
         persist(final_docs, np.vstack(emb_parts) if emb_parts else np.zeros((0, args.dim), dtype=np.float32))
 
+    close_progress()
+    if stopped:
+        # 'q' pressed: everything completed so far is checkpointed; exit cleanly (not an error)
+        print(
+            f"[stopped] saved: chunks={len(final_docs)} files_hashed={len(new_hashes)} "
+            f"— resume with: python scripts/index.py"
+        )
+        return
     if not args.quiet:
         print(f"Done. chunks={len(final_docs)} commit={current_commit[:10]} dirty_files={len(dirty_now)}")
         if dirty_now and not args.working_tree:

@@ -11,3 +11,7 @@ tree-sitter-typescript
 tree-sitter-go
 tree-sitter-rust
 tree-sitter-php
+rank-bm25>=0.2.2
+# optional int8 ONNX backend (faster/lower-RAM embedding on supported machines):
+#   pip install onnxruntime onnx onnxscript && python scripts/export_onnx.py
+#   then set EMBEDDINGGEMMA_BACKEND=onnx (or leave auto — it activates when the bundle exists)

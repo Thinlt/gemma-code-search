@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import pickle
+import re
 import signal
 import sys
 import time
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+from onnx_embedder import encoder_id
 
 SOCKET_PATH = os.getenv("EMBEDDINGGEMMA_SOCK", "/tmp/embeddinggemma.sock")
 PID_FILE = os.getenv("EMBEDDINGGEMMA_PID", "/tmp/embeddinggemma.daemon.pid")
@@ -59,14 +62,78 @@ def load_model():
         return _model
     import torch
     from sentence_transformers import SentenceTransformer
+    from transformers import logging as hf_logging
+
+    hf_logging.disable_progress_bar()  # drop the "Loading weights" bar — noise in logs
 
     log("Loading EmbeddingGemma-2 (text-only)...")
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
-    _model = SentenceTransformer(
-        "google/embeddinggemma-2",
-        model_kwargs={"torch_dtype": dtype},
-        config_kwargs={"vision_config": None, "audio_config": None},
-    )
+
+    backend = os.getenv("EMBEDDINGGEMMA_BACKEND", "torch").lower()
+    if backend == "onnx":
+        from onnx_embedder import OnnxEmbedder, bundle_available
+
+        if bundle_available():
+            try:
+                m = OnnxEmbedder()
+                probe = m.encode(
+                    ["probe"], prompt_name="CodeRetrieval", truncate_dim=_dim,
+                    normalize_embeddings=True, batch_size=1,
+                )
+                if np.isfinite(probe).all():
+                    _model = m
+                    log(f"Model ready on onnx int8 ep={m.provider}")
+                    return _model
+                log("[warn] onnx int8 non-finite probe; using torch")
+            except Exception as e:
+                log(f"[warn] onnx backend failed ({e}); using torch")
+        else:
+            log("[warn] EMBEDDINGGEMMA_BACKEND=onnx but no bundle; using torch (run scripts/export_onnx.py)")
+
+    def build(dtype) -> "SentenceTransformer":
+        return SentenceTransformer(
+            "google/embeddinggemma-2",
+            model_kwargs={"torch_dtype": dtype},
+            config_kwargs={"vision_config": None, "audio_config": None},
+        )
+
+    def resolve_dtype(device_type: str):
+        d = os.getenv("EMBEDDINGGEMMA_DTYPE", "auto").lower()
+        if d in ("fp32", "float32", "float"):
+            return torch.float32
+        if d in ("bf16", "bfloat16"):
+            return torch.bfloat16
+        if d in ("fp16", "float16", "half"):
+            return torch.float16
+        # measured on M2 Pro/MPS: bf16 ~18% slower through Metal, fp16 non-finite
+        if device_type == "cuda":
+            return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
+        return torch.float32
+
+    # sentence-transformers auto-selects cuda > mps > cpu
+    try:
+        if torch.cuda.is_available():
+            device_type = "cuda"
+        elif torch.backends.mps.is_available():
+            device_type = "mps"
+        else:
+            device_type = "cpu"
+    except Exception:
+        device_type = "cpu"
+
+    dtype = resolve_dtype(device_type)
+    _model = build(dtype)
+    if _model.device.type != "cpu":
+        try:
+            probe = _model.encode(
+                ["probe"], prompt_name="CodeRetrieval", truncate_dim=_dim,
+                normalize_embeddings=True, show_progress_bar=False, batch_size=1,
+            )
+            if not np.isfinite(probe).all():
+                raise RuntimeError("non-finite embeddings")
+        except Exception as e:
+            log(f"[warn] dtype {dtype} failed self-check ({e}); retrying fp32")
+            dtype = torch.float32
+            _model = build(dtype)
     log(f"Model ready on {_model.device} dtype={dtype}")
     return _model
 
@@ -109,6 +176,50 @@ def invalidate_index_cache(index_dir: Optional[str] = None) -> None:
         _index_cache.pop(str(Path(index_dir).resolve()), None)
 
 
+RRF_K = 60  # reciprocal rank fusion constant (standard k=60)
+_bm25_cache: "OrderedDict[str, Tuple[Any, Tuple[int]]]" = OrderedDict()
+
+_CAMEL = re.compile(r"[A-Z]+(?=[A-Z][a-z0-9])|[A-Z]?[a-z0-9]+|[A-Z]+")
+
+
+def code_tokens(text: str) -> List[str]:
+    """Identifier-aware BM25 tokens: split camelCase/PascalCase boundaries and keep
+    the raw lowercased form too, so 'refreshToken' matches the query 'refresh token'."""
+    out: List[str] = []
+    for w in re.findall(r"[A-Za-z0-9]+", text or ""):
+        out.append(w.lower())
+        parts = [p.lower() for p in _CAMEL.findall(w) if p]
+        if len(parts) > 1:
+            out.extend(parts)
+    return out
+
+
+def get_bm25(index_dir: str, documents: List[Dict]):
+    """BM25 over chunk path+name+content; rebuilt when documents.pkl changes."""
+    try:
+        from rank_bm25 import BM25Okapi
+    except ImportError:
+        return None
+    key = str(Path(index_dir).resolve())
+    try:
+        sig = (Path(index_dir, "documents.pkl").stat().st_mtime_ns,)
+    except OSError:
+        return None
+    cached = _bm25_cache.get(key)
+    if cached is not None and cached[1] == sig:
+        _bm25_cache.move_to_end(key)
+        return cached[0]
+    corpus = [
+        code_tokens(f"{d.get('path', '')} {d.get('name', '')} {d.get('content', '')}") or ["_empty_"]
+        for d in documents
+    ]
+    bm25 = BM25Okapi(corpus)
+    _bm25_cache[key] = (bm25, sig)
+    while len(_bm25_cache) > INDEX_CACHE_MAX:
+        _bm25_cache.popitem(last=False)
+    return bm25
+
+
 def do_search(req: Dict[str, Any]) -> Dict[str, Any]:
     model = load_model()
     index_dir = req.get("index_dir") or "./.code_index"
@@ -131,17 +242,53 @@ def do_search(req: Dict[str, Any]) -> Dict[str, Any]:
     scores = np.dot(embeddings, q_emb)
     top_idx = np.argsort(scores)[::-1]
 
+    max_per_file = int(req.get("max_per_file", MAX_PER_FILE))
+    scan_limit = max(top_k * 20, 100)
+    pool_size = max(50, top_k * 8)
+
+    # dense candidates: above min_score, in cosine order
+    dense_pool: List[int] = []
+    for idx in top_idx[:scan_limit]:
+        if scores[int(idx)] < min_score:
+            break  # scores are descending: no later candidate can pass
+        dense_pool.append(int(idx))
+        if len(dense_pool) >= pool_size:
+            break
+
+    # bm25 candidates: exact-token matches on identifiers; hybrid recall for
+    # symbol names the dense encoder dilutes (e.g. 'RetryPolicy', 'AuthService')
+    bm25_pool: List[int] = []
+    if req.get("hybrid", True):
+        bm25 = get_bm25(index_dir, documents)
+        if bm25 is not None:
+            q_toks = code_tokens(query)
+            if q_toks:
+                b_scores = bm25.get_scores(q_toks)
+                order = np.argsort(b_scores)[::-1][:pool_size]
+                bm25_pool = [int(i) for i in order if b_scores[i] > 0]
+
+    if bm25_pool:
+        dense_rank = {idx: r for r, idx in enumerate(dense_pool)}
+        bm25_rank = {idx: r for r, idx in enumerate(bm25_pool)}
+
+        def rrf(i: int) -> float:
+            s = 0.0
+            if i in dense_rank:
+                s += 1.0 / (RRF_K + dense_rank[i])
+            if i in bm25_rank:
+                s += 1.0 / (RRF_K + bm25_rank[i])
+            return s
+
+        fused = sorted(set(dense_pool) | set(bm25_pool), key=rrf, reverse=True)
+    else:
+        fused = dense_pool
+
     # diversity: without a per-file cap, one file whose many chunks all match
     # (e.g. an API client for exactly this query) floods the whole top-k and
     # pushes every other relevant file out of view
-    max_per_file = int(req.get("max_per_file", MAX_PER_FILE))
-    scan_limit = max(top_k * 20, 100)
     per_file: Dict[str, int] = {}
     picked: List[int] = []
-    for idx in top_idx[:scan_limit]:
-        score = float(scores[int(idx)])
-        if score < min_score:
-            break  # scores are descending: no later candidate can pass
+    for idx in fused:
         path = documents[int(idx)].get("path") or ""
         if max_per_file > 0 and per_file.get(path, 0) >= max_per_file:
             continue
@@ -166,13 +313,21 @@ def do_search(req: Dict[str, Any]) -> Dict[str, Any]:
             "content": doc.get("content", "")[:2500],
         })
 
-    return {
+    payload = {
         "ok": True,
         "results": results,
         "indexed_commit": meta.get("last_commit", ""),
         "dirty_at_index": meta.get("dirty_at_index", []),
         "num_chunks": meta.get("num_chunks", len(documents)),
+        "hybrid_used": bool(bm25_pool),
     }
+    # an index embedded by one encoder must not be searched by another: cosine
+    # scores across fp32-vs-int8 encoders are not comparable
+    cur_enc = encoder_id(model, dim)
+    idx_enc = meta.get("encoder") or f"embeddinggemma-2:torch:float32:{dim}"  # pre-onnx indexes
+    if cur_enc != idx_enc:
+        payload["encoder_mismatch"] = {"index": idx_enc, "current": cur_enc}
+    return payload
 
 
 def format_results_text(payload: Dict[str, Any], query: str) -> str:
@@ -190,6 +345,14 @@ def format_results_text(payload: Dict[str, Any], query: str) -> str:
         lines.append(
             f"_dirty (not auto-reindexed): {preview}{more}_\n"
             f"_To refresh those files: `python scripts/index.py --paths <file>`_\n"
+        )
+
+    mismatch = payload.get("encoder_mismatch")
+    if mismatch:
+        lines.append(
+            f"_encoder mismatch: index built with `{mismatch['index']}`, queries use "
+            f"`{mismatch['current']}` — rebuild with `python scripts/index.py --force` "
+            f"for consistent scores_\n"
         )
 
     results = payload.get("results") or []
