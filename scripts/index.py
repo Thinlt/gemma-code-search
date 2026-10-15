@@ -41,9 +41,11 @@ BATCH_SIZE = int(os.getenv("EMBEDDINGGEMMA_BATCH_SIZE", "4"))
 CHECKPOINT_FILES = int(os.getenv("EMBEDDINGGEMMA_CKPT_FILES", "100"))
 EMBED_SUBBATCH = 64  # chunks per encode call — also the granularity of a graceful 'q' stop
 # Version of the embedded string format (what CodeChunk.full_text produces).
-# 1 = "title|file|lang|text" (path included), 2 = path dropped. Old vectors embed a
-# different string, so an index from another format can only be rebuilt, never merged.
-TEXT_FORMAT = 2
+# 1 = "title|file|lang|text" (path included), 2 = path dropped, 3 = chunks over
+# 320 tokens split into parts titled "(part i/n)" with a signature context
+# line on parts 2+. Old vectors embed a different string, so an index from
+# another format can only be rebuilt, never merged.
+TEXT_FORMAT = 3
 DISPLAY_DIR_LEVELS = 2
 DISPLAY_DIR_MAX = 10
 DISPLAY_FILE_MAX = 32

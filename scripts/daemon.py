@@ -220,6 +220,14 @@ def get_bm25(index_dir: str, documents: List[Dict]):
     return bm25
 
 
+def _part_group(doc: Dict[str, Any]) -> Optional[Tuple[str, str, Optional[str], str]]:
+    """Identity of the source chunk a split part belongs to (chunker
+    TEXT_FORMAT 3): parts share path/kind/parent/name. None = whole chunk."""
+    if doc.get("part") is None:
+        return None
+    return (doc.get("path") or "", doc.get("kind") or "", doc.get("parent"), doc.get("name") or "")
+
+
 def do_search(req: Dict[str, Any]) -> Dict[str, Any]:
     model = load_model()
     index_dir = req.get("index_dir") or "./.code_index"
@@ -283,6 +291,27 @@ def do_search(req: Dict[str, Any]) -> Dict[str, Any]:
     else:
         fused = dense_pool
 
+    # small-to-big: split parts of one source chunk compete as a single entry —
+    # fused is score-ordered, so each group's first occurrence is its best part.
+    # Without this, the k slots fill with sibling parts of one long method.
+    part_groups: Dict[Tuple[str, str, Optional[str], str], List[int]] = {}
+    has_parts = any(d.get("part") is not None for d in documents)
+    if has_parts:
+        for i, d in enumerate(documents):
+            g = _part_group(d)
+            if g is not None:
+                part_groups.setdefault(g, []).append(i)
+        seen: set = set()
+        collapsed: List[int] = []
+        for idx in fused:
+            g = _part_group(documents[int(idx)])
+            if g is not None:
+                if g in seen:
+                    continue
+                seen.add(g)
+            collapsed.append(int(idx))
+        fused = collapsed
+
     # diversity: without a per-file cap, one file whose many chunks all match
     # (e.g. an API client for exactly this query) floods the whole top-k and
     # pushes every other relevant file out of view
@@ -301,16 +330,28 @@ def do_search(req: Dict[str, Any]) -> Dict[str, Any]:
     for idx in picked:
         score = float(scores[idx])
         doc = documents[int(idx)]
+        content = doc.get("content", "")
+        start_line, end_line = doc.get("start_line"), doc.get("end_line")
+        if has_parts and doc.get("part") is not None:
+            # stitch the parts back into the whole source chunk: tail matches
+            # return the full method/class, not just the matching slice
+            members = sorted(
+                part_groups.get(_part_group(doc), [idx]),
+                key=lambda i: documents[i]["part"][0],
+            )
+            content = "".join(documents[i].get("content", "") for i in members)
+            start_line = min(documents[i].get("start_line", 0) for i in members)
+            end_line = max(documents[i].get("end_line", 0) for i in members)
         results.append({
             "path": doc.get("path"),
             "name": doc.get("name"),
             "kind": doc.get("kind"),
             "parent": doc.get("parent"),
-            "start_line": doc.get("start_line"),
-            "end_line": doc.get("end_line"),
+            "start_line": start_line,
+            "end_line": end_line,
             "language": doc.get("language"),
             "score": round(score, 4),
-            "content": doc.get("content", "")[:2500],
+            "content": content[:2500],
         })
 
     payload = {
