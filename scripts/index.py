@@ -302,12 +302,25 @@ def resolve_dtype(device: str):
 
 
 def resolve_backend() -> str:
-    """EMBEDDINGGEMMA_BACKEND=torch (default) | onnx. The int8 ONNX bundle must be
-    asked for explicitly: measured on M2 Pro it is slower than torch fp32 MPS; it
-    earns its keep on CPU-only machines."""
-    b = os.getenv("EMBEDDINGGEMMA_BACKEND", "torch").lower()
-    if b in ("", "auto", "torch"):
+    """EMBEDDINGGEMMA_BACKEND=auto (default) | anemll | torch | onnx.
+    auto = anemll when the Core AI bundle is present and passes its probe,
+    else torch. anemll = the ANE package (fails hard if the bundle is absent).
+    onnx = int8 CPU bundle: measured on M2 Pro it is slower than torch fp32
+    MPS; it earns its keep on CPU-only machines."""
+    b = os.getenv("EMBEDDINGGEMMA_BACKEND", "auto").lower()
+    if b in ("", "auto"):
+        return "auto"
+    if b == "torch":
         return "torch"
+    if b == "anemll":
+        from anemll_embedder import bundle_available
+
+        if not bundle_available():
+            raise SystemExit(
+                "[error] EMBEDDINGGEMMA_BACKEND=anemll but no bundle — "
+                "see scripts/anemll_embedder.py docstring for setup"
+            )
+        return "anemll"
     if b == "onnx":
         from onnx_embedder import bundle_available
 
@@ -317,11 +330,41 @@ def resolve_backend() -> str:
                 "run: python scripts/export_onnx.py"
             )
         return "onnx"
+    if b == "anemll":
+        from anemll_embedder import bundle_available
+
+        if not bundle_available():
+            raise SystemExit(
+                "[error] EMBEDDINGGEMMA_BACKEND=anemll but no bundle — "
+                "see scripts/anemll_embedder.py docstring for setup"
+            )
+        return "anemll"
     return "torch"
 
 
 def load_model(dim: int) -> SentenceTransformer:
-    if resolve_backend() == "onnx":
+    backend = resolve_backend()
+    if backend in ("auto", "anemll"):
+        from anemll_embedder import AnemllEmbedder, bundle_available
+
+        if bundle_available():
+            model = AnemllEmbedder()
+            try:
+                probe = model.encode(
+                    ["def add(a, b):\n    return a + b", "x"],
+                    prompt_name="Document", truncate_dim=dim,
+                    normalize_embeddings=True, batch_size=2,
+                )
+                # isfinite alone misses the real failure mode seen on macOS 26:
+                # Core AI runs the tower but returns all-zero embeddings
+                if np.isfinite(probe).all() and float(np.linalg.norm(probe, axis=1).min()) > 0.5:
+                    print(f"[model] backend=anemll coreai placement={model.placement}")
+                    return model
+                print("[warn] anemll tower output is zero (Core AI too old for this package?); falling back to torch")
+            except Exception as e:
+                print(f"[warn] anemll backend failed ({e}); falling back to torch")
+
+    if backend == "onnx":
         from onnx_embedder import OnnxEmbedder
 
         model = OnnxEmbedder()

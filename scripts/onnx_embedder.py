@@ -42,6 +42,9 @@ def encoder_id(model, dim: int) -> str:
     queries must agree on it for cosine scores to mean anything."""
     if isinstance(model, OnnxEmbedder):
         return f"embeddinggemma-2:onnx-int8:{dim}"
+    tag = getattr(model, "encoder_tag", None)
+    if tag:
+        return f"embeddinggemma-2:{tag}:{dim}"
     dt = str(next(model.parameters()).dtype).replace("torch.", "")
     return f"embeddinggemma-2:torch:{dt}:{dim}"
 

@@ -68,7 +68,30 @@ def load_model():
 
     log("Loading EmbeddingGemma-2 (text-only)...")
 
-    backend = os.getenv("EMBEDDINGGEMMA_BACKEND", "torch").lower()
+    backend = os.getenv("EMBEDDINGGEMMA_BACKEND", "auto").lower()
+    if backend in ("auto", "anemll"):
+        from anemll_embedder import AnemllEmbedder, bundle_available
+
+        if bundle_available():
+            try:
+                m = AnemllEmbedder()
+                probe = m.encode(
+                    ["def add(a, b):\n    return a + b", "x"],
+                    prompt_name="Document", truncate_dim=_dim,
+                    normalize_embeddings=True, batch_size=2,
+                )
+                # isfinite alone misses the real failure mode seen on macOS 26:
+                # Core AI runs the tower but returns all-zero embeddings
+                if np.isfinite(probe).all() and float(np.linalg.norm(probe, axis=1).min()) > 0.5:
+                    _model = m
+                    log(f"Model ready on anemll coreai placement={m.placement}")
+                    return _model
+                log("[warn] anemll tower output is zero (Core AI too old for this package?); using torch")
+            except Exception as e:
+                log(f"[warn] anemll backend failed ({e}); using torch")
+        elif backend == "anemll":
+            log("[warn] EMBEDDINGGEMMA_BACKEND=anemll but no bundle; using torch (see anemll_embedder.py docstring)")
+
     if backend == "onnx":
         from onnx_embedder import OnnxEmbedder, bundle_available
 
