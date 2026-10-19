@@ -444,10 +444,25 @@ def main() -> None:
         help="Only index files under this directory (relative to --code-dir), into the shared index",
     )
     parser.add_argument("--code-dir", default=os.getenv("CODE_DIR", "."))
-    parser.add_argument("--index-dir", default=os.getenv("CODE_INDEX_DIR", "./.code_index"))
+    parser.add_argument(
+        "--index-dir",
+        default=None,
+        help="Directory for .code_index (default: <code_dir>/.code_index if code_dir != '.', else ./ .code_index)",
+    )
     parser.add_argument("--dim", type=int, default=int(os.getenv("TRUNCATE_DIM", "512")))
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+    code_dir_resolved = Path(args.code_dir).resolve()
+    if not code_dir_resolved.is_dir():
+        parser.error(
+            f"--code-dir must be an existing directory (resolved from cwd), got a file or missing path: {code_dir_resolved}"
+        )
+    # Resolve index-dir relative to code-dir: if code_dir is not '.', index-dir defaults to <code_dir>/.code_index
+    code_dir = os.path.abspath(args.code_dir)
+    if code_dir != "." and args.index_dir is None:
+        args.index_dir = os.path.join(code_dir, ".code_index")
+    elif args.index_dir is None:
+        args.index_dir = "./.code_index"
     restore_term = start_stop_listener()
     try:
         _run(args)

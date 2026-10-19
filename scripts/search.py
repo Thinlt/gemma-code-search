@@ -55,7 +55,11 @@ def main() -> None:
         help="Max chunks per file in top-k (0 = unlimited listing); overrides EMBEDDINGGEMMA_MAX_PER_FILE",
     )
     parser.add_argument("--code-dir", default=os.getenv("CODE_DIR", "."))
-    parser.add_argument("--index-dir", default=os.getenv("CODE_INDEX_DIR", "./.code_index"))
+    parser.add_argument(
+        "--index-dir",
+        default=None,
+        help="Directory for .code_index (default: <code_dir>/.code_index if code_dir != '.', else ./ .code_index)",
+    )
     parser.add_argument("--dim", type=int, default=int(os.getenv("TRUNCATE_DIM", "512")))
     parser.add_argument(
         "--no-reindex",
@@ -80,7 +84,18 @@ def main() -> None:
     args = parser.parse_args()
 
     code_dir = str(Path(args.code_dir).resolve())
-    index_dir = str(Path(args.index_dir).resolve())
+    if not Path(code_dir).is_dir():
+        parser.error(
+            f"--code-dir must be an existing directory (resolved from cwd), got a file or missing path: {code_dir}"
+        )
+    # Resolve index_dir relative to code_dir:
+    # if code_dir is not '.', default to <code_dir>/.code_index;
+    # otherwise keep the old default ./ .code_index
+    if args.code_dir.rstrip(os.sep) != "." and args.index_dir is None:
+        index_dir = os.path.join(code_dir, ".code_index")
+    else:
+        index_dir = args.index_dir or "./.code_index"
+    index_dir = str(Path(index_dir).resolve())
 
     if not args.no_reindex:
         run_index(code_dir, index_dir, args.dim, quiet=True)
