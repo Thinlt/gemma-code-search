@@ -23,27 +23,36 @@ Semantic search over the codebase with:
 
 ## Commands
 
+> The installed shims (`code-search`, `code-index`) live on PATH and run the
+> skill's uv-managed venv — use them from **any project directory**; never call
+> bare `python scripts/search.py`. They index the containing git repo root
+> automatically (`--code-dir` is pre-resolved). If neither shim is on PATH,
+> find the skill dir (walk-up `.claude|.cursor|.agents/skills/` or
+> `EMBEDDINGGEMMA_HOME`) and run `uv run --project <skill>/scripts python
+> <skill>/scripts/search.py --code-dir <repo-root> ...` (or, without uv,
+> `<skill>/scripts/.venv/bin/python <skill>/scripts/search.py ...`).
+
 ### Search (recommended)
 
 ```bash
-python scripts/search.py "your natural language query" --top-k 6
+code-search "your natural language query" --top-k 6
 ```
 
 Exhaustive listing of one topic — every matching chunk, no per-file cap (ranked recall, not a grep substitute):
 
 ```bash
-python scripts/search.py "webhook retry" --top-k 100 --max-per-file 0 --json
+code-search "webhook retry" --top-k 100 --max-per-file 0 --json
 ```
 
 Pure semantic ranking (no BM25 fusion) when you want dense-only behavior:
 
 ```bash
-python scripts/search.py "webhook retry" --no-bm25
+code-search "webhook retry" --no-bm25
 ```
 
-**Encoder consistency**: the index records which encoder built it (`meta.json` → `encoder`). If queries come from a different one (e.g. index built with torch fp32, queries with the ONNX int8 backend), cosine scores are not comparable — search prints a `_encoder mismatch_` warning; rebuild with `python scripts/index.py --force` after switching backends.
+**Encoder consistency**: the index records which encoder built it (`meta.json` → `encoder`). If queries come from a different one (e.g. index built with torch fp32, queries with the ONNX int8 backend), cosine scores are not comparable — search prints a `_encoder mismatch_` warning; rebuild with `code-index --force` after switching backends.
 
-**Index format versioning**: `meta.json` also records the chunk text format (`text_format`). After a skill update that changes it, search prints `[error] … full rebuild first` (the auto-reindex refuses to run) but still answers from the old index; `--paths`/`--subdir` updates are likewise refused. Run `python scripts/index.py --force` **once** to migrate — a plain `index.py` run also migrates automatically by rebuilding from scratch.
+**Index format versioning**: `meta.json` also records the chunk text format (`text_format`). After a skill update that changes it, search prints `[error] … full rebuild first` (the auto-reindex refuses to run) but still answers from the old index; `--paths`/`--subdir` updates are likewise refused. Run `code-index --force` **once** to migrate — a plain `code-index` run also migrates automatically by rebuilding from scratch.
 
 This will:
 
@@ -57,7 +66,7 @@ This will:
 After you edit files and need the index to match the working tree:
 
 ```bash
-python scripts/index.py --paths src/auth.py src/middleware/rate.py
+code-index --paths src/auth.py src/middleware/rate.py
 ```
 
 Then search again.
@@ -66,19 +75,19 @@ Then search again.
 
 ```bash
 # Commit-only incremental (same as auto before search)
-python scripts/index.py
+code-index
 
 # Also include uncommitted dirty files
-python scripts/index.py --working-tree
+code-index --working-tree
 
 # Index one subtree into the SHARED index (piece-by-piece, path identity is stable)
-python scripts/index.py --subdir services/api
+code-index --subdir services/api
 
 # Force re-embed a subtree only, keeping the rest of the shared index
-python scripts/index.py --subdir services/api --force
+code-index --subdir services/api --force
 
 # Full rebuild
-python scripts/index.py --force
+code-index --force
 ```
 
 `--subdir` runs accumulate into one index: search covers everything indexed so far, and already-indexed files (matching file hash) are reused — not re-embedded — by later `--subdir` or full runs.
@@ -87,7 +96,7 @@ python scripts/index.py --force
 
 Indexing flushes a checkpoint every `EMBEDDINGGEMMA_CKPT_FILES` (default 100) files, each written atomically (tmp + rename) so Ctrl-C can never corrupt the index. If a run is killed (Ctrl-C, crash, reboot), rerun the **same command without `--force`** — it resumes from the last checkpoint instead of starting over.
 
-**Search never auto-resumes**: the auto-reindex before search covers committed changes only; while a build is half-done, search answers from what is indexed and prints a `[partial-index]` warning. Finish the build explicitly with `python scripts/index.py`.
+**Search never auto-resumes**: the auto-reindex before search covers committed changes only; while a build is half-done, search answers from what is indexed and prints a `[partial-index]` warning. Finish the build explicitly with `code-index`.
 
 **Graceful stop (`q`)**: while indexing in a terminal, press `q` — the in-flight sub-batch is finished, a checkpoint is saved, and the process exits `0` (a stop, **not** a crash/error). Rerun the same command to resume from the checkpoint. Non-TTY runs (pipes, CI, agent shells) are unaffected.
 
@@ -101,9 +110,12 @@ Indexing flushes a checkpoint every `EMBEDDINGGEMMA_CKPT_FILES` (default 100) fi
 ### Daemon ops
 
 ```bash
-python scripts/daemon.py --status
-python scripts/daemon.py --stop
+uv run --project <skill-dir>/scripts python <skill-dir>/scripts/daemon.py --status
+uv run --project <skill-dir>/scripts python <skill-dir>/scripts/daemon.py --stop
 ```
+
+(`<skill-dir>` is where the skill is installed — resolve it like the shims do:
+`EMBEDDINGGEMMA_HOME` → walk-up `.claude|.cursor|.agents/skills/embeddinggemma-code-search`.)
 
 Idle default: **900s** (15 min). Override with `EMBEDDINGGEMMA_IDLE_SEC`.
 
@@ -117,22 +129,44 @@ Idle default: **900s** (15 min). Override with `EMBEDDINGGEMMA_IDLE_SEC`.
 
 ## Setup
 
+One canonical install of the skill (code + venv + models shared by every
+project — the daemon serves all projects from one RAM-resident model; each
+project only gets its own `.code_index/`):
+
 ```bash
-pip install -r scripts/requirements.txt
-python scripts/index.py --force    # first index
-python scripts/search.py "test query"
+cd embeddinggemma-code-search
+./install.sh                 # uv sync → scripts/.venv + code-search/code-index on PATH
+./install.sh --skills-global # additionally register for all harnesses globally
+./install.sh --project <repo> # instead register inside one repo (per-project)
 ```
 
-Add `.code_index/` to `.gitignore`.
+- **Global** (`--skills-global`): symlinked into `~/.claude/skills`,
+  `~/.cursor/skills`, `~/.agents/skills` — available in every project without
+  touching the repo. Recommended.
+- **Per-project** (`--project <repo>`): symlinked into that repo's
+  `.claude/|.cursor/|.agents/skills/` — lets a repo commit/carry the skill
+  registration; the venv, models, and daemon stay shared and global.
+- The shims resolve the skill at run time: `EMBEDDINGGEMMA_HOME` → nearest
+  `.claude|.cursor|.agents/skills/embeddinggemma-code-search` up the tree →
+  baked-in global home. Copy (not symlink) the skill somewhere and point
+  `EMBEDDINGGEMMA_HOME` at it to pin a different copy.
+
+First index (run inside the target repo):
+
+```bash
+code-index --force
+code-search "test query"
+```
+
+`.code_index/` is appended to the repo `.gitignore` automatically by the shim.
 
 ### Optional: int8 ONNX backend (CPU-only machines)
 
 The default backend is **torch** (GPU when available). An int8-quantized ONNX replica of the same pipeline exists for machines without a usable GPU — it uses less RAM and no torch dependency at search time:
 
 ```bash
-pip install onnxruntime onnx onnxscript
-python scripts/export_onnx.py        # export → quantize → validate vs fp32 (gates: mean cos ≥ 0.97)
-EMBEDDINGGEMMA_BACKEND=onnx python scripts/search.py "query"
+uv sync --extra onnx && uv run --project scripts python scripts/export_onnx.py  # export → quantize → validate vs fp32 (gates: mean cos ≥ 0.97)
+EMBEDDINGGEMMA_BACKEND=onnx code-search "query"
 ```
 
 Measured on M2 Pro: int8 ONNX (CPU EP) is ~2.5x **slower** than torch fp32 on MPS — keep the torch default on GPU machines. The bundle lands in `models/embeddinggemma2-int8/` (gitignored) and activates only via `EMBEDDINGGEMMA_BACKEND=onnx`.
@@ -159,8 +193,12 @@ Measured on M2 Pro: int8 ONNX (CPU EP) is ~2.5x **slower** than torch fp32 on MP
 
 ## Install locations
 
+Harness discovery dirs — global (`~/.claude/...`) or per-project (repo-relative); created by `install.sh --skills-global` / `--project`:
+
 | Harness | Path |
 |---------|------|
 | Cursor | `.cursor/skills/embeddinggemma-code-search/` |
 | Claude Code | `.claude/skills/embeddinggemma-code-search/` |
 | Antigravity | `.agents/skills/embeddinggemma-code-search/` |
+
+The skill folder may be a symlink to one canonical copy (recommended).

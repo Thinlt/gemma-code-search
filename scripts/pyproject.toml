@@ -1,0 +1,26 @@
+[project]
+name = "embeddinggemma-code-search"
+version = "0.1.0"
+description = "EmbeddingGemma-2 semantic code search (index, search, daemon)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "sentence-transformers>=3.0.0",
+    "transformers>=4.45.0",
+    "torch",
+    "numpy",
+    "pillow",
+    "torchvision",
+    "tree-sitter>=0.22.0",
+    "tree-sitter-python",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "tree-sitter-go",
+    "tree-sitter-rust",
+    "tree-sitter-php",
+    "rank-bm25>=0.2.2",
+]
+
+[tool.uv]
+# optional int8 ONNX backend group: uv sync --extra onnx
+[project.optional-dependencies]
+onnx = ["onnxruntime", "onnx", "onnxscript"]
