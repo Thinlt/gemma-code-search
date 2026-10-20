@@ -14,12 +14,21 @@ resolve_skill() {
   fi
   d="$PWD"
   while [ -n "$d" ] && [ "$d" != "/" ]; do
-    for candidates in ".claude" ".cursor" ".agents"; do
+    for candidates in ".claude" ".cursor" ".agents" ".config/opencode" ".gemini"; do
       home="$d/$candidates/skills/embeddinggemma-code-search"
       if [ -f "$home/scripts/search.py" ]; then
         echo "$home"
         return
       fi
+      # renamed copies: any skills/* dir carrying this skill's SKILL.md
+      for home in "$d/$candidates"/skills/*/; do
+        [ -f "${home}scripts/search.py" ] || continue
+        [ -f "${home}SKILL.md" ] || continue
+        if grep -iq '^name: .*embeddinggemma' "${home}SKILL.md"; then
+          echo "${home%/}"
+          return
+        fi
+      done
     done
     d="$(dirname "$d")"
   done
