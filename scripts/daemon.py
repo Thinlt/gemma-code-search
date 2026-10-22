@@ -34,6 +34,14 @@ IDLE_SEC = int(os.getenv("EMBEDDINGGEMMA_IDLE_SEC", "900"))
 QUEUE_MAX = int(os.getenv("EMBEDDINGGEMMA_QUEUE_MAX", "24"))
 INDEX_CACHE_MAX = int(os.getenv("EMBEDDINGGEMMA_INDEX_CACHE", "3"))
 MAX_PER_FILE = int(os.getenv("EMBEDDINGGEMMA_MAX_PER_FILE", "2"))
+# continuation hint: how much stored content is shown per result, what the
+# hint marker looks like ("=> " prefix + marker so agents treat the line as
+# meta-instruction, never as file content), and how many lines a "read more"
+# suggestion covers
+RESULT_CONTENT_CAP = 2500
+CONT_MARK = "[...] "
+CONT_HINT_LABEL = "=> "
+CONT_JUMP = 160
 TRUNCATE_DIM = int(os.getenv("TRUNCATE_DIM", "512"))
 HOST = os.getenv("EMBEDDINGGEMMA_HOST", "127.0.0.1")
 PORT = int(os.getenv("EMBEDDINGGEMMA_PORT", "8765"))
@@ -251,6 +259,94 @@ def _part_group(doc: Dict[str, Any]) -> Optional[Tuple[str, str, Optional[str], 
     return (doc.get("path") or "", doc.get("kind") or "", doc.get("parent"), doc.get("name") or "")
 
 
+def _continuation_hint(
+    path: str,
+    kind: str,
+    shown_from: int,
+    shown_through: int,
+    total_end: int,
+    matched: Optional[Tuple[Optional[int], Optional[int]]],
+) -> str:
+    """One compact line appended to an excerpt whose source continues beyond
+    what is shown — a long document (md/README) whose whole-file chunk was
+    split by the chunker, or stitched content cut at the preview cap. Only
+    states the essentials — the file and the line range still to read, plus
+    the matched range when it differs — leaving how to fetch it to the agent.
+    """
+    m0, m1 = matched if matched else (None, None)
+    # anchor the range at the matched section when it lies past the excerpt
+    jump_from = int(m0) if m0 and int(m0) > shown_through else shown_through + 1
+    jump_to = total_end if total_end >= jump_from else jump_from + CONT_JUMP - 1
+    hint = f"{CONT_HINT_LABEL}{CONT_MARK}continue reading in <{path}>: lines {jump_from}-{jump_to}"
+    m1 = int(m1) if m1 else (int(m0) if m0 else None)
+    whole_span = bool(m0) and int(m0) <= shown_from and m1 >= jump_to
+    if m0 and m1 > shown_through and not whole_span and (int(m0), m1) != (jump_from, jump_to):
+        hint += f" (query matched {int(m0)}-{m1})"
+    return hint
+
+
+def _build_result(
+    documents: List[Dict],
+    idx: int,
+    has_parts: bool,
+    part_groups: Optional[Dict[Tuple[str, str, Optional[str], str], List[int]]],
+    score: float,
+) -> Dict[str, Any]:
+    """One search result: parts stitched back into the source chunk, excerpt
+    capped, with a continuation hint appended when the source keeps going."""
+    doc = documents[int(idx)]
+    content = doc.get("content", "")
+    start_line, end_line = doc.get("start_line"), doc.get("end_line")
+    matched = (start_line, end_line)  # range of the part that matched, before stitching
+    if has_parts and doc.get("part") is not None:
+        # stitch the parts back into the whole source chunk: tail matches
+        # return the full method/class, not just the matching slice
+        members = sorted(
+            (part_groups or {}).get(_part_group(doc), [idx]),
+            key=lambda i: documents[i]["part"][0],
+        )
+        content = "".join(documents[i].get("content", "") for i in members)
+        start_line = min(documents[i].get("start_line", 0) for i in members)
+        end_line = max(documents[i].get("end_line", 0) for i in members)
+    # where does the shown excerpt end, and does the source continue past it?
+    # (long documents exceed the char cap; document tail parts are trimmed to
+    # fit the token budget). total_lines is recorded by the chunker for
+    # document chunks; old indexes fall back to the stitched end line.
+    excerpt = content[:RESULT_CONTENT_CAP]
+    total_end = int(doc.get("total_lines") or 0) or int(end_line or 0)
+    shown_through = int(start_line or 1) + excerpt.count("\n")
+    truncated = len(content) > RESULT_CONTENT_CAP
+    # end metadata beyond the excerpt only proves continuation for document
+    # (file-level / total_lines-carrying) chunks — for code chunks the stored
+    # end line can exceed the stripped content's own lines without any
+    # content missing, so truncation is the only trigger there
+    continues = truncated or (
+        (doc.get("kind") == "file" or doc.get("total_lines")) and total_end > shown_through
+    )
+    continuation = ""
+    if continues:
+        continuation = _continuation_hint(
+            path=doc.get("path") or "",
+            kind=doc.get("kind") or "",
+            shown_from=int(start_line or 1),
+            shown_through=shown_through,
+            total_end=total_end,
+            matched=matched,
+        )
+    return {
+        "path": doc.get("path"),
+        "name": doc.get("name"),
+        "kind": doc.get("kind"),
+        "parent": doc.get("parent"),
+        "start_line": start_line,
+        "end_line": end_line,
+        "language": doc.get("language"),
+        "score": round(score, 4),
+        "content": excerpt + (f"\n\n{continuation}" if continuation else ""),
+        "continuation": continuation or None,
+    }
+
+
 def do_search(req: Dict[str, Any]) -> Dict[str, Any]:
     model = load_model()
     index_dir = req.get("index_dir") or "./.code_index"
@@ -349,33 +445,10 @@ def do_search(req: Dict[str, Any]) -> Dict[str, Any]:
         if len(picked) >= top_k:
             break
 
-    results = []
-    for idx in picked:
-        score = float(scores[idx])
-        doc = documents[int(idx)]
-        content = doc.get("content", "")
-        start_line, end_line = doc.get("start_line"), doc.get("end_line")
-        if has_parts and doc.get("part") is not None:
-            # stitch the parts back into the whole source chunk: tail matches
-            # return the full method/class, not just the matching slice
-            members = sorted(
-                part_groups.get(_part_group(doc), [idx]),
-                key=lambda i: documents[i]["part"][0],
-            )
-            content = "".join(documents[i].get("content", "") for i in members)
-            start_line = min(documents[i].get("start_line", 0) for i in members)
-            end_line = max(documents[i].get("end_line", 0) for i in members)
-        results.append({
-            "path": doc.get("path"),
-            "name": doc.get("name"),
-            "kind": doc.get("kind"),
-            "parent": doc.get("parent"),
-            "start_line": start_line,
-            "end_line": end_line,
-            "language": doc.get("language"),
-            "score": round(score, 4),
-            "content": content[:2500],
-        })
+    results = [
+        _build_result(documents, idx, has_parts, part_groups, float(scores[idx]))
+        for idx in picked
+    ]
 
     payload = {
         "ok": True,

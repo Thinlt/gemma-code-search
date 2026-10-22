@@ -137,6 +137,17 @@ Mục tiêu ban đầu: giảm RAM / tăng tốc. Kết quả đo trên M2 Pro l
 - **Execution provider**: mặc định CPU EP. CoreML EP chia graph này thành ~290 partition (2083/3563 node hỗ trợ) → partition-thrash + OOM khi compile lúc máy bận; chỉ bật qua `EMBEDDINGGEMMA_ONNX_EP=coreml` sau khi tự đo.
 - **Nhất quán encoder**: `meta.json` ghi trường `encoder` (vd `embeddinggemma-2:torch:float32:512` hay `embeddinggemma-2:onnx-int8:512`); daemon so với encoder hiện tại, lệch thì cảnh báo `_encoder mismatch_` + gợi ý `index.py --force`. Cosine giữa encoder khác nhau không so được — index int8 + query fp32 cho score vô nghĩa.
 
+### 2.9 Continuation hint cho chunk document (văn bản dài)
+
+Vấn đề: file văn bản (`.md`…) không parse AST → cả file là 1 chunk `kind="file"`, dài quá 320 token bị split thành part, part cuối còn bị trim vừa budget. Khi search trúng giữa file dài, daemon stitch lại **toàn bộ** part (trả về từ đầu file) rồi cắt content ở 2500 ký tự → đoạn khớp query có khi không hiện gì, và agent không biết phải đọc tiếp file ở đâu.
+
+Quyết định **render hint lúc search, không bake vào content lúc chunk**:
+
+- Chunker (text_format vẫn 3 — `full_text` không đổi nên vector cache/use vẫn chạy): nhánh fallback document/x-file ghi `total_lines` (số dòng nguồn) vào từng part trong `to_dict()`. Đây là metadata, không nằm trong chuỗi embed — index cũ chỉ thiếu trường này, daemon tự degrade.
+- Daemon `_build_result` tính `shown_through` (dòng cuối excerpt hiển thị) so với `total_lines` + độ dài content; khi nguồn còn nội dung chưa hiển thị (bị cắt cap HOẶC total_lines > shown, chỉ áp cho chunk document — code chunk metadata `end_line` có thể lệch do `.strip()` mà không thiếu gì), nối một dòng hướng dẫn vào cuối `content` **và** trường `continuation`. Dòng này **cách nội dung chính một dòng trống**, có tiền tố `=>` để agent hiểu là meta-instruction (không phải nội dung file), và **chỉ nói tinh giản**: file + dải dòng chưa hiển thị (anchor ở dòng matched khi nó nằm ngoài excerpt), kèm dải matched khi khác — cách đọc do agent tự quyết: `=> [...] continue reading in <path>: lines x-y (query matched x'-y')`.
+- Con trỏ đọc bám dòng **matched** khi nó nằm ngoài excerpt (`jump_from = m0`): anchor đúng chỗ khớp query thay vì cuối excerpt. Hằng số: `RESULT_CONTENT_CAP` (2500), `CONT_MARK` (`[...] `), `CONT_JUMP` (160 dòng/lần đọc).
+- Không bake lúc chunking vì: (1) hint nằm trong content sẽ pollute BM25 corpus và xuất hiện rối rít **giữa các part** khi stitch; (2) chỉ lúc search mới biết excerpt bị cắt ở đâu; (3) index cũ hưởng lợi ngay không cần reindex.
+
 ---
 
 ## 3. Kiến trúc tổng quan

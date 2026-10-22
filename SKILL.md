@@ -61,6 +61,16 @@ This will:
 3. Search and print ranked function/class snippets
 4. Warn about **dirty files** not yet reindexed
 
+### Continuation hints for documents
+
+Long text documents (`.md`, READMEs, generated docs) are not AST-chunked: the whole file is one source chunk, split into ~320-token parts, with the total line count recorded on every chunk (`total_lines`). A search hit in the middle of such a file comes back as an excerpt that starts at the top and is cut before the matching section. When the source continues past what is shown, the result carries a one-line instruction, e.g.:
+
+```
+=> [...] continue reading in <docs/arch.md>: lines 300-1340 (query matched 300-341)
+```
+
+The hint sits on its own line, separated from the excerpt by a blank line, and is prefixed `=>` so agents treat it as a retrieval meta-instruction — never as file content. It only states the essentials (the file + the still-unshown line range, plus the matched range when it differs); how to fetch it is the agent's call (Read tool, sed, …). The hint is rendered at search time from the stored line ranges — the embedded text is untouched (`TEXT_FORMAT` stays `3`), so no full rebuild is required; old indexes simply start emitting hints for newly indexed/updated files, and `code-index --force` migrates everything (cheap: unchanged chunks reuse cached vectors). If you see this marker, trust the line ranges, not the excerpt: read the file at the matched lines before summarizing or editing from the snippet.
+
 ### Reindex touched files (agent-controlled)
 
 After you edit files and need the index to match the working tree:
@@ -126,6 +136,7 @@ Idle default: **900s** (15 min). Override with `EMBEDDINGGEMMA_IDLE_SEC`.
 3. Files you just changed stay **out of auto-reindex** until you run `--paths` or `--working-tree`.
 4. Search output may list `dirty (not auto-reindexed)`. If you need those versions, reindex paths then search again.
 5. Before editing critical logic from a snippet, **read the live file** at the given path/lines.
+6. When a result ends with `[...] continue reading in file <path> ...`, the excerpt was cut mid-document: follow the marked line ranges (especially "the query matched") and read the real file before relying on the snippet.
 
 ## Setup
 

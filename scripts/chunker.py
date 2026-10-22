@@ -150,6 +150,12 @@ class CodeChunk:
     language: str = ""
     part: Optional[Tuple[int, int]] = None  # (i, n) when split from a longer chunk
     context_sig: str = ""  # signature line of the original chunk, prefixed on parts 2+
+    # total line count of the source the chunk came from — set on file-level
+    # (document) chunks so search can render a "continue reading" hint when
+    # only part of the document is shown. Not part of full_text: the embedded
+    # string stays unchanged (TEXT_FORMAT 3), so existing vectors and the
+    # embedding cache keep working.
+    total_lines: Optional[int] = None
 
     @property
     def full_text(self) -> str:
@@ -182,6 +188,7 @@ class CodeChunk:
             "language": self.language,
             "part": self.part,
             "full_text": self.full_text,
+            "total_lines": self.total_lines,
         }
 
 
@@ -293,6 +300,7 @@ def _split_oversized(chunks: List[CodeChunk]) -> List[CodeChunk]:
                 language=c.language,
                 part=(i, n),
                 context_sig=sig,
+                total_lines=c.total_lines,
             )
             # the chars/token estimate can undershoot; trim whole body lines
             # until the real tokenizer confirms the final full_text fits
@@ -355,6 +363,7 @@ def chunk_source(source: str, path: str, language: str) -> List[CodeChunk]:
                 end_line=lines,
                 content=source,
                 language=language or "unknown",
+                total_lines=lines,
             )
         ]
         return _split_oversized(chunks)
@@ -375,6 +384,7 @@ def chunk_source(source: str, path: str, language: str) -> List[CodeChunk]:
                 end_line=lines,
                 content=source,
                 language=language,
+                total_lines=lines,
             )
         ]
     return _split_oversized(chunks)
