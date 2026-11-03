@@ -83,6 +83,25 @@ def _bf16_to_fp16(buf: bytes) -> np.ndarray:
     return u32.view(np.float32).astype(np.float16)
 
 
+def _explain(error: str) -> str:
+    """Translate opaque Core AI failures into something actionable.
+
+    When a Neural Engine program can't be mapped, Core AI surfaces the real
+    cause as `Program load failed — no memory (transient; retry under lower
+    memory pressure)`, but only when no compute unit is preferred. With
+    `ComputeUnitKind.neural_engine()` it collapses to
+    `Foundation._GenericObjCError error 0.` — which tells the user nothing.
+    """
+    if "GenericObjCError" in error or "no memory" in error:
+        return (
+            f"{error} — Neural Engine could not load the tower; the usual cause is "
+            "memory pressure (ANE program mapping needs free RAM). Close memory-hungry "
+            "apps and retry, or force another backend: "
+            "EMBEDDINGGEMMA_ANE_COMPUTE=cpu / EMBEDDINGGEMMA_BACKEND=torch"
+        )
+    return error
+
+
 class AnemllEmbedder:
     """SentenceTransformer-compatible encode() over the ANE Core AI tower."""
 
@@ -115,7 +134,21 @@ class AnemllEmbedder:
 
         tower = Path(bundle_dir) / "text_embeds_s320.aimodel" if bundle_dir else TOWER_DIR
         compute = os.getenv("EMBEDDINGGEMMA_ANE_COMPUTE", "ane").strip().lower()
-        self._proc = subprocess.Popen(
+        self._load_payload = {"cmd": "load", "package": str(tower), "compute": compute}
+        self._proc = self._spawn()
+        try:
+            report = self._request(self._load_payload)
+        except BaseException:
+            # don't strand a live worker/temp dir when the tower can't be loaded
+            # (e.g. Neural Engine out of memory); the caller falls back to torch
+            self.close()
+            raise
+        self.placement = report.get("placement", "unknown")
+        self.provider = f"coreai:{compute}:{self.placement}"
+
+    # ---- worker IPC ------------------------------------------------------
+    def _spawn(self) -> subprocess.Popen:
+        return subprocess.Popen(
             [str(_coreai_python()), str(Path(__file__).resolve().parent / "anemll_worker.py")],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -123,37 +156,47 @@ class AnemllEmbedder:
             text=True,
             bufsize=1,
         )
-        report = self._request({"cmd": "load", "package": str(tower), "compute": compute})
-        self.placement = report.get("placement", "unknown")
-        self.provider = f"coreai:{compute}:{self.placement}"
 
-    # ---- worker IPC ------------------------------------------------------
-    def _request(self, payload: dict) -> dict:
+    def _recover(self) -> None:
+        """Replace a dead worker and reload the tower into it.
+
+        Reloading is the point: a fresh worker has no tower, so retrying an
+        `embed` without re-issuing `load` would only earn "tower not loaded".
+        The temp dir is deliberately left alone — `close()` deletes it, and
+        `_encode_batch` still needs it for the retried request.
+        """
+        old = self._proc
+        self._proc = self._spawn()
+        if old is not None and old.poll() is None:
+            old.terminate()
+        self._request(self._load_payload, _retry=False)
+
+    def _request(self, payload: dict, _retry: bool = True) -> dict:
         proc = self._proc
         if proc is None or proc.stdin is None or proc.stdout is None:
             raise RuntimeError("coreai worker is not running")
+
+        def recover_or_raise(msg: str):
+            # only mid-session commands are worth recovering: re-issuing a failed
+            # `load` would just hit the same wall (e.g. ANE out of memory), and
+            # recovering a `shutdown` would spin up a worker purely to kill it
+            if _retry and payload.get("cmd") not in ("load", "shutdown"):
+                self._recover()
+                return self._request(payload, _retry=False)
+            raise RuntimeError(msg)
+
         # make sure the process is still alive
         if proc.poll() is not None:
-            raise RuntimeError("coreai worker process died")
+            return recover_or_raise("coreai worker process died")
         proc.stdin.write(json.dumps(payload) + "\n")
         proc.stdin.flush()
         line = proc.stdout.readline()
         if not line:
-            # worker may have crashed; reinitialize once then retry
-            self.close()
-            self._proc = subprocess.Popen(
-                [str(_coreai_python()), str(Path(__file__).resolve().parent / "anemll_worker.py")],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
-            )
-            report = self._request(payload)  # retry after restart
-            return report
+            # empty reply = worker died without answering
+            return recover_or_raise("coreai worker died without replying")
         reply = json.loads(line)
         if not reply.get("ok"):
-            raise RuntimeError(reply.get("error") or "coreai worker failed")
+            raise RuntimeError(_explain(reply.get("error") or "coreai worker failed"))
         return reply
 
     def close(self) -> None:

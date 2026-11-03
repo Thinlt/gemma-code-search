@@ -348,8 +348,8 @@ def load_model(dim: int) -> SentenceTransformer:
         from anemll_embedder import AnemllEmbedder, bundle_available
 
         if bundle_available():
-            model = AnemllEmbedder()
             try:
+                model = AnemllEmbedder()
                 probe = model.encode(
                     ["def add(a, b):\n    return a + b", "x"],
                     prompt_name="Document", truncate_dim=dim,
@@ -367,8 +367,8 @@ def load_model(dim: int) -> SentenceTransformer:
     if backend == "onnx":
         from onnx_embedder import OnnxEmbedder
 
-        model = OnnxEmbedder()
         try:
+            model = OnnxEmbedder()
             probe = model.encode(
                 ["probe"], prompt_name="Document", truncate_dim=dim,
                 normalize_embeddings=True, batch_size=1,
