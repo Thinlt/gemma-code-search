@@ -276,8 +276,15 @@ Mọi mở rộng nên kiểm tra lại mục 5 (đặc biệt collision cũ–m
 
 ## 8. Bối cảnh repo
 
-- Skill nằm trong monorepo **[Thinlt/Grok](https://github.com/Thinlt/Grok)** tại thư mục `embeddinggemma-code-search/`.  
-- Repo standalone `Thinlt/embeddinggemma-code-search` đã được gỡ; **nguồn chính thức** là thư mục trong **Grok**.
+- Repo chính thức: **[Thinlt/gemma-code-search](https://github.com/Thinlt/gemma-code-search)** —
+  repo standalone, chứa toàn bộ skill (code, `install.sh`, shim, tài liệu).
+- Lịch sử phát triển được tách từ monorepo `Thinlt/Grok` (thư mục `embeddinggemma-code-search/`)
+  bằng `git subtree split`, nên các commit gốc vẫn còn.
+- Tên kỹ thuật bên trong (tên skill `embeddinggemma-code-search`, biến môi trường
+  `EMBEDDINGGEMMA_*`, thư mục index `.code_index/`) **giữ nguyên** để không phá vỡ cài đặt
+  và shim đang có trên máy người dùng.
+- Các harness (`Claude Code`, `Cursor`, `Antigravity`, `opencode`, `Gemini CLI`) tìm skill theo
+  `SKILL.md`; `install.sh` đọc `name:` trong frontmatter nên đổi tên thư mục không làm hỏng đăng ký.
 
 ---
 

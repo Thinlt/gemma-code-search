@@ -145,7 +145,7 @@ project — the daemon serves all projects from one RAM-resident model; each
 project only gets its own `.code_index/`):
 
 ```bash
-cd embeddinggemma-code-search
+cd gemma-code-search
 ./install.sh                 # uv sync → scripts/.venv + code-search/code-index on PATH
 ./install.sh --skills-global # additionally register for all harnesses globally
 ./install.sh --project <repo> # instead register inside one repo (per-project)
