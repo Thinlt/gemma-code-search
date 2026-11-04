@@ -1,0 +1,28 @@
+version: 2
+
+updates:
+  # Python runtime + dev dependencies (scripts/pyproject.toml, scripts/requirements.txt, scripts/uv.lock)
+  - package-ecosystem: pip
+    directory: /scripts
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: [dependencies, python]
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      tree-sitter:
+        patterns: ["tree-sitter*"]
+      ml-stack:
+        patterns: ["torch*", "transformers", "sentence-transformers", "tokenizers", "safetensors", "numpy"]
+      onnx:
+        patterns: ["onnx*"]
+
+  # Actions used by .github/workflows/*
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: chore(ci)
