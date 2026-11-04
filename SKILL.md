@@ -11,7 +11,7 @@ Semantic search over the codebase with:
 - Languages: **Python, JavaScript, JSX, TypeScript, TSX, Go, Rust, PHP** (+ markdown fallback)
 - **Shared daemon**: model loaded once in RAM; auto-start on first search; idle unload
 - **Reindex policy**: on search, only update when **git commit** advances; **dirty/touched files are not auto-reindexed** — you control when to refresh them
-- **.gitignore-aware**: files excluded by git ignore rules (nested `.gitignore`, `.git/info/exclude`, negation, `**`; tracked files are never excluded) are skipped, and pruned from the index on the next persist (`--paths` cannot re-add an ignored file)
+- **.gitignore-aware**: files excluded by git ignore rules are skipped. Every repository enclosing a file is consulted, so a directory ignored by a parent repo is excluded even when it is itself a git checkout (nested repo). Ignored entries are pruned on the next rebuild; `--paths` cannot re-add them.
 - **Hybrid BM25 + dense**: exact symbol/name matches (camelCase-aware BM25) are fused with semantic ranking (RRF) — better recall when the query names a symbol. Disable per-query with `--no-bm25`
 
 ## When to use
@@ -23,14 +23,24 @@ Semantic search over the codebase with:
 
 ## Commands
 
-> The installed shims (`code-search`, `code-index`) live on PATH and run the
-> skill's uv-managed venv — use them from **any project directory**; never call
-> bare `python scripts/search.py`. They index the containing git repo root
-> automatically (`--code-dir` is pre-resolved). If neither shim is on PATH,
-> find the skill dir (walk-up `.claude|.cursor|.agents/skills/` or
+There is a single command: **`code-search`**. Searching is the default action;
+index maintenance is the `index` subcommand.
+
+> The installed shim (`code-search`) lives on PATH and runs the skill's
+> uv-managed venv — use it from **any project directory**; never call bare
+> `python scripts/cli.py`. It targets the containing git repo root
+> automatically (`CODE_DIR` is pre-resolved). If the shim is not on PATH, find
+> the skill dir (walk-up `.claude|.cursor|.agents/skills/` or
 > `EMBEDDINGGEMMA_HOME`) and run `uv run --project <skill>/scripts python
-> <skill>/scripts/search.py --code-dir <repo-root> ...` (or, without uv,
-> `<skill>/scripts/.venv/bin/python <skill>/scripts/search.py ...`).
+> <skill>/scripts/cli.py ...` (or, without uv,
+> `<skill>/scripts/.venv/bin/python <skill>/scripts/cli.py ...`).
+
+```bash
+code-search "query"          # search (default)
+code-search index [...]      # index maintenance
+code-search daemon [...]     # daemon status / stop
+code-search --help           # usage for everything
+```
 
 ### Search (recommended)
 
@@ -50,9 +60,9 @@ Pure semantic ranking (no BM25 fusion) when you want dense-only behavior:
 code-search "webhook retry" --no-bm25
 ```
 
-**Encoder consistency**: the index records which encoder built it (`meta.json` → `encoder`). If queries come from a different one (e.g. index built with torch fp32, queries with the ONNX int8 backend), cosine scores are not comparable — search prints a `_encoder mismatch_` warning; rebuild with `code-index --force` after switching backends.
+**Encoder consistency**: the index records which encoder built it (`meta.json` → `encoder`). If queries come from a different one (e.g. index built with torch fp32, queries with the ONNX int8 backend), cosine scores are not comparable — search prints a `_encoder mismatch_` warning; rebuild with `code-search index --force` after switching backends.
 
-**Index format versioning**: `meta.json` also records the chunk text format (`text_format`). After a skill update that changes it, search prints `[error] … full rebuild first` (the auto-reindex refuses to run) but still answers from the old index; `--paths`/`--subdir` updates are likewise refused. Run `code-index --force` **once** to migrate — a plain `code-index` run also migrates automatically by rebuilding from scratch.
+**Index format versioning**: `meta.json` also records the chunk text format (`text_format`). After a skill update that changes it, search prints `[error] … full rebuild first` (the auto-reindex refuses to run) but still answers from the old index; `--paths`/`--subdir` updates are likewise refused. Run `code-search index --force` **once** to migrate — a plain `code-search index` run also migrates automatically by rebuilding from scratch.
 
 This will:
 
@@ -69,14 +79,14 @@ Long text documents (`.md`, READMEs, generated docs) are not AST-chunked: the wh
 => [...] continue reading in <docs/arch.md>: lines 300-1340 (query matched 300-341)
 ```
 
-The hint sits on its own line, separated from the excerpt by a blank line, and is prefixed `=>` so agents treat it as a retrieval meta-instruction — never as file content. It only states the essentials (the file + the still-unshown line range, plus the matched range when it differs); how to fetch it is the agent's call (Read tool, sed, …). The hint is rendered at search time from the stored line ranges — the embedded text is untouched (`TEXT_FORMAT` stays `3`), so no full rebuild is required; old indexes simply start emitting hints for newly indexed/updated files, and `code-index --force` migrates everything (cheap: unchanged chunks reuse cached vectors). If you see this marker, trust the line ranges, not the excerpt: read the file at the matched lines before summarizing or editing from the snippet.
+The hint sits on its own line, separated from the excerpt by a blank line, and is prefixed `=>` so agents treat it as a retrieval meta-instruction — never as file content. It only states the essentials (the file + the still-unshown line range, plus the matched range when it differs); how to fetch it is the agent's call (Read tool, sed, …). The hint is rendered at search time from the stored line ranges — the embedded text is untouched (`TEXT_FORMAT` stays `3`), so no full rebuild is required; old indexes simply start emitting hints for newly indexed/updated files, and `code-search index --force` migrates everything (cheap: unchanged chunks reuse cached vectors). If you see this marker, trust the line ranges, not the excerpt: read the file at the matched lines before summarizing or editing from the snippet.
 
 ### Reindex touched files (agent-controlled)
 
 After you edit files and need the index to match the working tree:
 
 ```bash
-code-index --paths src/auth.py src/middleware/rate.py
+code-search index --paths src/auth.py src/middleware/rate.py
 ```
 
 Then search again.
@@ -85,19 +95,19 @@ Then search again.
 
 ```bash
 # Commit-only incremental (same as auto before search)
-code-index
+code-search index
 
 # Also include uncommitted dirty files
-code-index --working-tree
+code-search index --working-tree
 
 # Index one subtree into the SHARED index (piece-by-piece, path identity is stable)
-code-index --subdir services/api
+code-search index --subdir services/api
 
 # Force re-embed a subtree only, keeping the rest of the shared index
-code-index --subdir services/api --force
+code-search index --subdir services/api --force
 
 # Full rebuild
-code-index --force
+code-search index --force
 ```
 
 `--subdir` runs accumulate into one index: search covers everything indexed so far, and already-indexed files (matching file hash) are reused — not re-embedded — by later `--subdir` or full runs.
@@ -106,7 +116,7 @@ code-index --force
 
 Indexing flushes a checkpoint every `EMBEDDINGGEMMA_CKPT_FILES` (default 100) files, each written atomically (tmp + rename) so Ctrl-C can never corrupt the index. If a run is killed (Ctrl-C, crash, reboot), rerun the **same command without `--force`** — it resumes from the last checkpoint instead of starting over.
 
-**Search never auto-resumes**: the auto-reindex before search covers committed changes only; while a build is half-done, search answers from what is indexed and prints a `[partial-index]` warning. Finish the build explicitly with `code-index`.
+**Search never auto-resumes**: the auto-reindex before search covers committed changes only; while a build is half-done, search answers from what is indexed and prints a `[partial-index]` warning. Finish the build explicitly with `code-search index`.
 
 **Graceful stop (`q`)**: while indexing in a terminal, press `q` — the in-flight sub-batch is finished, a checkpoint is saved, and the process exits `0` (a stop, **not** a crash/error). Rerun the same command to resume from the checkpoint. Non-TTY runs (pipes, CI, agent shells) are unaffected.
 
@@ -120,12 +130,13 @@ Indexing flushes a checkpoint every `EMBEDDINGGEMMA_CKPT_FILES` (default 100) fi
 ### Daemon ops
 
 ```bash
-uv run --project <skill-dir>/scripts python <skill-dir>/scripts/daemon.py --status
-uv run --project <skill-dir>/scripts python <skill-dir>/scripts/daemon.py --stop
+code-search daemon --status   # JSON: pid, model device, idle time, queue depth
+code-search daemon --stop     # stop now
+code-search daemon --restart  # stop now; the next search starts it again
 ```
 
-(`<skill-dir>` is where the skill is installed — resolve it like the shims do:
-`EMBEDDINGGEMMA_HOME` → walk-up `.claude|.cursor|.agents/skills/gemma-code-search`.)
+(`code-search daemon` runs inside the same venv as search, so no separate
+`<skill-dir>` invocation is needed.)
 
 Idle default: **900s** (15 min). Override with `EMBEDDINGGEMMA_IDLE_SEC`.
 
@@ -146,7 +157,7 @@ project only gets its own `.code_index/`):
 
 ```bash
 cd gemma-code-search
-./install.sh                 # uv sync → scripts/.venv + code-search/code-index on PATH
+./install.sh                 # uv sync → scripts/.venv + code-search on PATH
 ./install.sh --skills-global # additionally register for all harnesses globally
 ./install.sh --project <repo> # instead register inside one repo (per-project)
 ```
@@ -165,7 +176,7 @@ cd gemma-code-search
 First index (run inside the target repo):
 
 ```bash
-code-index --force
+code-search index --force
 code-search "test query"
 ```
 

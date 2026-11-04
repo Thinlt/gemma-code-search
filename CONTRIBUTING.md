@@ -36,8 +36,8 @@ uv sync --project scripts --extra onnx    # …plus the optional ONNX backend
 Run the CLIs straight from the checkout:
 
 ```bash
-uv run --project scripts python scripts/index.py  --code-dir <repo> --force
-uv run --project scripts python scripts/search.py --code-dir <repo> "rate limiting"
+uv run --project scripts python scripts/cli.py index --code-dir <repo> --force
+uv run --project scripts python scripts/cli.py "rate limiting" --code-dir <repo>
 ```
 
 Installing the shims (`./install.sh`) is optional for development and will point them at your
@@ -48,8 +48,10 @@ checkout.
 | Path | Responsibility |
 |------|----------------|
 | `scripts/chunker.py` | Tree-sitter parsing and AST-aware chunk splitting |
-| `scripts/index.py` | Indexing CLI, checkpointing, incremental/hash bookkeeping |
-| `scripts/search.py` | Search CLI |
+| `scripts/cli.py` | `code-search` entry point: subcommand routing, help, daemon ops |
+| `scripts/repo_ignore.py` | git-ignore filtering, including directories hidden by an enclosing repo |
+| `scripts/index.py` | Indexing implementation: checkpointing, incremental/hash bookkeeping |
+| `scripts/search.py` | Search implementation |
 | `scripts/daemon.py` | Shared model process, request queue, BM25 + dense fusion |
 | `scripts/client_ipc.py` | Unix-socket / TCP client used by both CLIs |
 | `scripts/onnx_embedder.py`, `scripts/export_onnx.py` | Optional int8 ONNX backend and its exporter |
@@ -76,22 +78,24 @@ and terse. `DESIGN.md` is the human-facing design record and is written in Tiế
 
 ## Tests and checks
 
-There is no unit-test suite yet; verification is currently manual and end-to-end. Before opening a
-pull request, run:
+`tests/test_repo_ignore.py` covers git-ignore filtering — nested repositories hidden by an outer
+`.gitignore`, tracked files, non-git directories, and symlinked code dirs. It needs no embedding
+model, so it runs in seconds. Before opening a pull request, run:
 
 ```bash
-uvx ruff check scripts     # must be clean (config in scripts/pyproject.toml)
+uvx ruff check scripts tests   # must be clean (config in scripts/pyproject.toml)
+python tests/test_repo_ignore.py
 ```
 
-and exercise the change against a real repository:
+Everything else is verified manually and end-to-end. Exercise the change against a real repository:
 
 ```bash
-uv run --project scripts python scripts/index.py  --code-dir /path/to/repo --force
-uv run --project scripts python scripts/search.py --code-dir /path/to/repo "your query" --top-k 6
+uv run --project scripts python scripts/cli.py index --code-dir /path/to/repo --force
+uv run --project scripts python scripts/cli.py "your query" --code-dir /path/to/repo --top-k 6
 ```
 
 If your change touches chunking or the index format, also verify that an existing index still loads
-or that the migration path (`code-index --force`) prints the expected message. Please state in the
+or that the migration path (`code-search index --force`) prints the expected message. Please state in the
 pull request which OS and backend (torch/MPS/CUDA/ONNX/ANE) you tested on.
 
 ## Commit messages

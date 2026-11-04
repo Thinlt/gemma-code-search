@@ -481,14 +481,14 @@ def format_results_text(payload: Dict[str, Any], query: str) -> str:
         more = f" (+{len(dirty) - 8} more)" if len(dirty) > 8 else ""
         lines.append(
             f"_dirty (not auto-reindexed): {preview}{more}_\n"
-            f"_To refresh those files: `python scripts/index.py --paths <file>`_\n"
+            f"_To refresh those files: `code-search index --paths <file>`_\n"
         )
 
     mismatch = payload.get("encoder_mismatch")
     if mismatch:
         lines.append(
             f"_encoder mismatch: index built with `{mismatch['index']}`, queries use "
-            f"`{mismatch['current']}` — rebuild with `python scripts/index.py --force` "
+            f"`{mismatch['current']}` — rebuild with `code-search index --force` "
             f"for consistent scores_\n"
         )
 

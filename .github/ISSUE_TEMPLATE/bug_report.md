@@ -57,5 +57,5 @@ Paste the relevant output. Add `--json` if it helps. Redact paths or code you ca
 
 ## Additional context
 
-Logs from the daemon (`uv run --project scripts python scripts/daemon.py --status`), screenshots,
+Logs from the daemon (`uv run --project scripts python scripts/cli.py daemon --status`), screenshots,
 or anything else that helps.

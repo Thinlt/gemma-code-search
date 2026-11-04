@@ -32,7 +32,21 @@ jobs:
       - name: Ruff (config from scripts/pyproject.toml)
         run: |
           pip install --quiet ruff
-          ruff check scripts
+          ruff check scripts tests
+
+  tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: git-ignore filtering (nested repos, tracked files, symlinked dirs)
+        run: python tests/test_repo_ignore.py
 
   shell:
     name: Shell scripts

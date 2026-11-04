@@ -54,10 +54,11 @@ Default (no flags): set up the venv and shims only — no registration.
 
 What each step does:
   1. uv sync      one shared venv at scripts/.venv (uv manages python too).
-  2. shims        code-search / code-index into $BIN_DIR; they resolve the
+  2. shim         a single `code-search` command into $BIN_DIR; it resolves the
                   skill at run time (EMBEDDINGGEMMA_HOME -> nearest skills dir
-                  up the tree -> this copy) and index the git repo you run
-                  them from.
+                  up the tree -> this copy) and targets the git repo you run it
+                  from. Search with `code-search "..."`; index with
+                  `code-search index ...`.
   3. registration symlink this skill dir into skills dirs:
 
                     agent        global dir                 project dir
@@ -143,11 +144,16 @@ echo "[install] venv ready: $HERE/scripts/.venv"
 
 # ---- 2. shims: substitute the global skill home, install to PATH ---------
 mkdir -p "$BIN_DIR"
-for shim in code-search code-index; do
-  sed "s|@SKILL_HOME@|$HERE|g" "$HERE/shim/$shim.sh" > "$BIN_DIR/$shim"
-  chmod +x "$BIN_DIR/$shim"
-done
-echo "[install] shims: $BIN_DIR/code-search, $BIN_DIR/code-index"
+sed "s|@SKILL_HOME@|$HERE|g" "$HERE/shim/code-search.sh" > "$BIN_DIR/code-search"
+chmod +x "$BIN_DIR/code-search"
+echo "[install] shim: $BIN_DIR/code-search"
+
+# the pre-merge release shipped a separate `code-index` binary; folding index
+# into `code-search index` leaves its shim orphaned, so remove the one we own
+if [ -f "$BIN_DIR/code-index" ] && grep -qs 'EmbeddingGemma indexer shim' "$BIN_DIR/code-index"; then
+  rm -f "$BIN_DIR/code-index"
+  echo "[install] removed obsolete shim $BIN_DIR/code-index (use: code-search index)"
+fi
 
 # ---- 3. harness registration --------------------------------------------
 register() { # register <skills-dir>

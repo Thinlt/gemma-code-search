@@ -12,9 +12,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 def run_index(code_dir: str, index_dir: str, dim: int, quiet: bool = True) -> None:
@@ -23,65 +23,116 @@ def run_index(code_dir: str, index_dir: str, dim: int, quiet: bool = True) -> No
     --commit-only keeps search fast: it never resumes a backlog of unindexed
     files (e.g. an interrupted full build) — that stays an explicit index run.
     """
-    cmd = [
-        sys.executable,
-        str(Path(__file__).resolve().parent / "index.py"),
-        "--code-dir",
-        code_dir,
-        "--index-dir",
-        index_dir,
-        "--dim",
-        str(dim),
-        "--commit-only",
-    ]
-    if quiet:
-        cmd.append("--quiet")
-    subprocess.call(cmd)
+    import index as index_cli
+
+    args = index_cli.build_parser().parse_args([])
+    args.code_dir = code_dir
+    args.index_dir = index_dir
+    args.dim = dim
+    args.commit_only = True
+    args.quiet = quiet
+    try:
+        index_cli.run(args)
+    except SystemExit as e:
+        # the reindex is best-effort: search still answers from the existing index,
+        # so report why it was skipped and carry on
+        if e.code not in (None, 0):
+            print(e.code, file=sys.stderr)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="EmbeddingGemma semantic code search")
-    parser.add_argument("query", help="Natural language query")
-    parser.add_argument("--top-k", type=int, default=6)
-    parser.add_argument(
+def build_parser() -> argparse.ArgumentParser:
+    """Parser for the search command, shared by `code-search` and `search.py`."""
+    parser = argparse.ArgumentParser(
+        prog="code-search search",
+        description=(
+            "Search the semantic index for code that matches a natural-language query.\n"
+            "Chunks are ranked by hybrid BM25 + embedding similarity (RRF fusion)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  code-search "where is rate limiting applied?"
+  code-search "refresh token rotation" --top-k 10
+  code-search "webhook retry" --top-k 100 --max-per-file 0 --json
+  code-search "auth middleware" --no-bm25     # dense-only ranking
+
+the index is built with:
+  code-search index --force
+""",
+    )
+    query_group = parser.add_argument_group("query")
+    query_group.add_argument("query", help="what to look for, in natural language")
+    query_group.add_argument(
+        "--top-k",
+        type=int,
+        default=6,
+        metavar="N",
+        help="number of results to return (default: 6)",
+    )
+    query_group.add_argument(
         "--min-score",
         type=float,
         default=0.12,
+        metavar="S",
+        help="drop results scoring below this (default: 0.12)",
     )
-    parser.add_argument(
+    query_group.add_argument(
         "--max-per-file",
         type=int,
         default=None,
-        help="Max chunks per file in top-k (0 = unlimited listing); overrides EMBEDDINGGEMMA_MAX_PER_FILE",
+        metavar="N",
+        help="max chunks per file in the result set; 0 = unlimited (default: $EMBEDDINGGEMMA_MAX_PER_FILE or 2)",
     )
-    parser.add_argument("--code-dir", default=os.getenv("CODE_DIR", "."))
-    parser.add_argument(
-        "--index-dir",
-        default=None,
-        help="Directory for .code_index (default: <code_dir>/.code_index if code_dir != '.', else ./ .code_index)",
-    )
-    parser.add_argument("--dim", type=int, default=int(os.getenv("TRUNCATE_DIM", "512")))
-    parser.add_argument(
-        "--no-reindex",
-        action="store_true",
-        help="Skip auto commit-based reindex before search",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print raw JSON instead of formatted text",
-    )
-    parser.add_argument(
-        "--no-daemon",
-        action="store_true",
-        help="Force local in-process model (slow, no shared daemon)",
-    )
-    parser.add_argument(
+
+    rank_group = parser.add_argument_group("ranking")
+    rank_group.add_argument(
         "--no-bm25",
         action="store_true",
-        help="Disable BM25+dense hybrid fusion (dense cosine only)",
+        help="disable BM25 + dense fusion and rank on dense cosine similarity alone",
     )
-    args = parser.parse_args()
+
+    index_group = parser.add_argument_group("index")
+    index_group.add_argument(
+        "--no-reindex",
+        action="store_true",
+        help="skip the commit-based reindex normally run before searching",
+    )
+    index_group.add_argument(
+        "--code-dir",
+        default=os.getenv("CODE_DIR", "."),
+        metavar="PATH",
+        help="repository to search (default: the git repo containing the current directory)",
+    )
+    index_group.add_argument(
+        "--index-dir",
+        default=None,
+        metavar="PATH",
+        help="where the index lives (default: <code-dir>/.code_index)",
+    )
+    index_group.add_argument(
+        "--dim",
+        type=int,
+        default=int(os.getenv("TRUNCATE_DIM", "512")),
+        metavar="N",
+        help="embedding dimension: 768, 512, 256 or 128 (default: 512)",
+    )
+
+    output_group = parser.add_argument_group("output")
+    output_group.add_argument(
+        "--json",
+        action="store_true",
+        help="print raw JSON instead of formatted snippets",
+    )
+    output_group.add_argument(
+        "--no-daemon",
+        action="store_true",
+        help="run the model in this process instead of the shared daemon (slow; debugging only)",
+    )
+    return parser
+
+
+def main(argv: Optional[list] = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     code_dir = str(Path(args.code_dir).resolve())
     if not Path(code_dir).is_dir():
@@ -102,19 +153,14 @@ def main() -> None:
 
     if not (Path(index_dir) / "documents.pkl").exists():
         print("Index missing → full build...")
-        subprocess.check_call(
-            [
-                sys.executable,
-                str(Path(__file__).resolve().parent / "index.py"),
-                "--code-dir",
-                code_dir,
-                "--index-dir",
-                index_dir,
-                "--dim",
-                str(args.dim),
-                "--force",
-            ]
-        )
+        import index as index_cli
+
+        build_args = index_cli.build_parser().parse_args([])
+        build_args.code_dir = code_dir
+        build_args.index_dir = index_dir
+        build_args.dim = args.dim
+        build_args.force = True
+        index_cli.run(build_args)
 
     if args.no_daemon:
         from daemon import do_search, format_results_text

@@ -23,7 +23,7 @@ Xây một **công cụ tìm code theo nghĩa** (semantic code search) phục v�
 
 ### 2.1 Load model mỗi lần search → chậm
 
-Mỗi lần `python scripts/search.py` là process mới → load model lại rất tốn thời gian.
+Mỗi lần `code-search` là process mới → load model lại rất tốn thời gian.
 
 **Quyết định:** Daemon host-level giữ model trong RAM.
 
@@ -33,7 +33,7 @@ Mỗi lần `python scripts/search.py` là process mới → load model lại r�
 | Idle unload | Không request trong `EMBEDDINGGEMMA_IDLE_SEC` (mặc định 900s) → giải phóng model + thoát process |
 | Queue ngắn | Nhiều agent gọi đồng thời → queue FIFO, `QUEUE_MAX` (mặc định 24); đầy thì trả `queue_full` |
 | Đa repo | **Một model**, nhiều `index_dir` (index theo từng project) |
-| UX skill | Agent vẫn chỉ gọi `python scripts/search.py "..."` — không cần biết daemon |
+| UX skill | Agent vẫn chỉ gọi `code-search "..." --code-dir <repo>` — không cần biết daemon |
 
 IPC: Unix domain socket (Linux/macOS); Windows / fallback: TCP localhost (`EMBEDDINGGEMMA_TCP=1`).
 
@@ -52,11 +52,11 @@ Mỗi lần search (mặc định):
   → KHÔNG tự resume index dở dang (backlog file chưa có hash) — chỉ cảnh báo [partial-index]
 
 Agent muốn index đúng bản đang viết:
-  → python scripts/index.py --paths <file1> <file2>
+  → code-search index --paths <file1> <file2>
   → (tuỳ chọn) --working-tree nếu cần toàn bộ dirty
 
 Index dở dang (Ctrl-C giữa chừng):
-  → chạy lại python scripts/index.py (không --force) — resume từ checkpoint
+  → chạy lại cùng lệnh code-search index (không --force) — resume từ checkpoint
 ```
 
 | Lớp | Nguồn chân lý | Ai cập nhật index |
@@ -216,16 +216,34 @@ Connect sẵn → (reindex commit nếu HEAD đổi) → encode query nhanh → 
 ### Agent vừa sửa file, cần search đúng bản mới
 
 ```bash
-python scripts/index.py --paths src/foo.py src/bar.py
-python scripts/search.py "..."
+code-search index --paths src/foo.py src/bar.py
+code-search "..."
 ```
 
 ### Tắt daemon sớm / xem trạng thái
 
 ```bash
-python scripts/daemon.py --status
-python scripts/daemon.py --stop
+code-search daemon --status
+code-search daemon --stop
 ```
+
+### Một command duy nhất
+
+Trước đây có hai binary (`code-search`, `code-index`). Nay chỉ còn **một** lệnh
+`code-search`, với subcommand:
+
+| Lệnh | Việc |
+|------|------|
+| `code-search "query"` | search (mặc định, không cần gõ `search`) |
+| `code-search index [...]` | build/update index (mọi flag cũ của `code-index`) |
+| `code-search daemon [...]` | `--status`, `--stop`, `--restart` |
+| `code-search --help` | help đầy đủ; `<subcommand> --help` cho từng phần |
+
+Shim truyền repo root qua biến `CODE_DIR` (không phải `--code-dir`), nên shim
+không cần biết subcommand nào đang chạy. `scripts/cli.py` định tuyến subcommand
+**trước** khi import torch/sentence-transformers, nên `--help` trả về trong
+~0.1s thay vì vài giây. `install.sh` tự gỡ shim `code-index` cũ nếu phát hiện nó
+do bản trước cài.
 
 ---
 
@@ -237,6 +255,11 @@ python scripts/daemon.py --stop
 4. **Giữ** chunk theo AST (function/class…), không quay lại chỉ-chunk-file nếu không có lý do mạnh.  
 5. **Giữ** tách: daemon = model + search; index policy = client/`index.py`.  
 6. Model dùng chung host; index **không** trộn giữa các repo (`index_dir` riêng).
+7. **Tôn trọng .gitignore của mọi repo bao quanh file.** Một thư mục bị repo cha ignore
+   (ví dụ `ECC` trong `.gitignore` của repo ngoài) **không được** index, kể cả khi bên
+   trong nó là một git checkout riêng — repo con không thể tự ignore chính root của nó,
+   nên chỉ hỏi repo gần nhất là sai. Chuỗi repo được hỏi: repo của file → repo bao nó →
+   … → repo chứa code dir (không đi xa hơn).
 
 ---
 

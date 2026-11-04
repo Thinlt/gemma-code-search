@@ -23,7 +23,7 @@ Please include, as far as you can:
 
 - A description of the issue and its impact
 - Steps to reproduce, or a minimal proof of concept
-- The affected component (`scripts/index.py`, `scripts/daemon.py`, the shims, `install.sh`, …)
+- The affected component (`scripts/cli.py`, `scripts/index.py`, `scripts/repo_ignore.py`, `scripts/daemon.py`, the shim, `install.sh`, …)
 - Your operating system, Python version and backend (torch / ONNX / ANE)
 
 ## What to expect

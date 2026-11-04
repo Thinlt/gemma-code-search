@@ -48,7 +48,7 @@ The first run downloads the EmbeddingGemma-2 weights from Hugging Face (a few GB
 git clone https://github.com/Thinlt/gemma-code-search.git
 cd gemma-code-search
 
-./install.sh                  # uv sync + `code-search` / `code-index` shims on PATH
+./install.sh                  # uv sync + the `code-search` command on PATH
 ./install.sh --skills-global  # + register the skill for every known agent (recommended)
 ./install.sh --project <repo> # …or register inside a single repository
 ```
@@ -58,11 +58,21 @@ See `./install.sh --help` for per-agent registration (`--agent claude,cursor,ope
 Then, in any git repository:
 
 ```bash
-code-index --force          # first full build
+code-search index --force   # first full build
 code-search "authentication middleware"
 ```
 
 ## Usage
+
+There is one command, `code-search`. Searching is the default action; index
+maintenance lives in the `index` subcommand, and the shared daemon in `daemon`.
+
+```bash
+code-search "query"          # search
+code-search index [...]      # build or update the index
+code-search daemon [...]     # daemon status / stop
+code-search --help           # full usage
+```
 
 ### Search
 
@@ -89,11 +99,11 @@ code-search "webhook retry" --top-k 100 --max-per-file 0 --json
 ### Index
 
 ```bash
-code-index                     # commit-only incremental (same as the auto step before search)
-code-index --force             # full rebuild
-code-index --paths src/auth.py # reindex specific files (the agent-controlled path)
-code-index --working-tree      # include uncommitted dirty files
-code-index --subdir services/api    # index one subtree into the shared index
+code-search index                     # commit-only incremental (same as the auto step before search)
+code-search index --force             # full rebuild
+code-search index --paths src/auth.py # reindex specific files (the agent-controlled path)
+code-search index --working-tree      # include uncommitted dirty files
+code-search index --subdir services/api    # index one subtree into the shared index
 ```
 
 ### Agent workflow
@@ -102,7 +112,7 @@ code-index --subdir services/api    # index one subtree into the shared index
 search  →  discover paths
 edit    →  dirty files are NOT auto-reindexed
 need fresh semantics for edited files?
-        →  code-index --paths <files>
+        →  code-search index --paths <files>
         →  search again
 ```
 
@@ -112,8 +122,8 @@ hint. Trust the line ranges — read the real file before acting on the snippet.
 ### Daemon
 
 ```bash
-uv run --project scripts python scripts/daemon.py --status
-uv run --project scripts python scripts/daemon.py --stop
+code-search daemon --status
+code-search daemon --stop
 ```
 
 The daemon idle-unloads after `EMBEDDINGGEMMA_IDLE_SEC` (default `900`). Every environment
@@ -128,12 +138,13 @@ variable is documented in [SKILL.md](SKILL.md#environment-optional).
 ├── README.md
 ├── install.sh            # venv + shims + agent registration
 ├── shim/
-│   ├── code-search.sh    # PATH shim, resolves the skill at run time
-│   └── code-index.sh
+│   └── code-search.sh    # PATH shim, resolves the skill at run time
 └── scripts/
+    ├── cli.py            # `code-search` entry point (search / index / daemon)
     ├── chunker.py        # tree-sitter AST chunking
-    ├── index.py          # indexer CLI
-    ├── search.py         # search CLI
+    ├── repo_ignore.py    # git-ignore filtering (nested-repo aware)
+    ├── index.py          # index CLI implementation
+    ├── search.py         # search CLI implementation
     ├── daemon.py         # shared model daemon + BM25/dense fusion
     ├── client_ipc.py     # Unix socket / TCP client
     ├── onnx_embedder.py  # optional int8 ONNX backend
@@ -150,12 +161,12 @@ variable is documented in [SKILL.md](SKILL.md#environment-optional).
 or re-run `./install.sh`.
 
 **`_encoder mismatch_` warning** — the index was built with a different backend (torch vs ONNX int8).
-Rebuild with `code-index --force`.
+Rebuild with `code-search index --force`.
 
 **`[error] … full rebuild first`** — the chunk text format changed after an update. Run
-`code-index --force` once to migrate.
+`code-search index --force` once to migrate.
 
-**`[partial-index]` warning** — a previous build was interrupted. Rerun the same `code-index` command
+**`[partial-index]` warning** — a previous build was interrupted. Run `code-search index` again
 (without `--force`) to resume from the last checkpoint.
 
 **Slow first search** — the daemon is loading the model into RAM. Later searches reuse it.

@@ -14,12 +14,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One command instead of two.** `code-index` is gone; indexing is now
+  `code-search index ...`, and the daemon is `code-search daemon --status|--stop|--restart`.
+  `code-search "query"` is unchanged, as are all index flags. `install.sh` removes the
+  orphaned `code-index` shim left by earlier installs.
+- `code-search --help` is now a proper usage screen: grouped commands, examples, exit
+  statuses, and per-subcommand help. Routing happens before the embedding stack is
+  imported, so `--help` returns in ~0.1s.
 - Skill renamed `embeddinggemma-code-search` → `gemma-code-search` (frontmatter `name:` and the
   registration folder). The `EMBEDDINGGEMMA_*` environment variables, the `.code_index/` directory
-  and the `code-search` / `code-index` commands are unchanged. Shims still resolve the pre-rename
-  folder and frontmatter, and `install.sh` removes a stale legacy registration when it re-points it.
+  and the `code-search` command are unchanged. Shims still resolve the pre-rename folder and
+  frontmatter, and `install.sh` removes a stale legacy registration when it re-points it.
 - `README.md` is now a standalone project README (previously scoped to the monorepo).
 - `DESIGN.md` §8 records this repository as the canonical source.
+
+### Fixed
+
+- **Indexed files inside a nested git repository that the enclosing repository ignores.**
+  Ignore rules were checked against the file's *nearest* repository only, and a repository
+  cannot ignore its own root — so a directory such as `ECC/` listed in the outer `.gitignore`
+  was still indexed in full. Every repository enclosing a file is now consulted, up to the one
+  governing the code dir. A rebuild (`code-search index --force`) prunes entries that earlier
+  runs let through.
 
 ## [0.1.0]
 

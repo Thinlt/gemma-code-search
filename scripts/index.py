@@ -32,7 +32,6 @@ hf_logging.disable_progress_bar()  # drop the "Loading weights" bar — noise in
 
 from chunker import EXT_TO_LANG, CodeChunk, chunk_file
 from onnx_embedder import encoder_id
-from repo_ignore import gitignore_excluded
 
 SUPPORTED_EXTS = set(EXT_TO_LANG.keys()) | {".md"}
 # Embedder input cap in tokens. The model's tokenizer reports model_max_length=1e18,
@@ -122,6 +121,62 @@ def subdir_scope(subdir: str, all_files: Dict[str, Path]) -> Set[str]:
         sub = sub[2:]
     sub = sub.rstrip("/")
     return {p for p in all_files if p == sub or p.startswith(sub + "/")}
+
+
+def run_git_stdin(cmd: List[str], cwd: str, input_text: str) -> str:
+    try:
+        r = subprocess.run(["git"] + cmd, cwd=cwd, input=input_text, capture_output=True, text=True)
+        return r.stdout
+    except Exception:
+        return ""
+
+
+def governing_repos(code_dir: str, files: Dict[str, Path]) -> Dict[str, str]:
+    """rel path → nearest git repo root at/above the file ('' when none). Cached per directory."""
+    cache: Dict[str, str] = {}
+    out: Dict[str, str] = {}
+    for rel in files:
+        d = str(Path(rel).parent)
+        if d not in cache:
+            cur = Path(code_dir, d).resolve()
+            cache[d] = next((str(a) for a in (cur, *cur.parents) if (a / ".git").exists()), "")
+        out[rel] = cache[d]
+    return out
+
+
+def gitignore_excluded(code_dir: str, files: Dict[str, Path]) -> Set[str]:
+    """Rel paths excluded by .gitignore rules with full git semantics (nested
+    .gitignore, .git/info/exclude, negation, '**'); tracked files are never
+    excluded. Empty set when git or a repo is unavailable — non-git dirs are
+    left untouched by design."""
+    by_repo: Dict[str, List[str]] = {}
+    for rel, repo in governing_repos(code_dir, files).items():
+        if repo:
+            by_repo.setdefault(repo, []).append(rel)
+    if not by_repo:
+        return set()
+
+    excluded: Set[str] = set()
+    code_p = Path(code_dir)
+    for repo, rels in sorted(by_repo.items()):
+        repo_p = Path(repo)
+        if repo_p == code_p or repo_p in code_p.parents:
+            # repo at/above the code dir: file paths sit under a prefix relative to the repo
+            prefix = os.path.relpath(code_dir, repo).replace(os.sep, "/")
+            to_repo = (lambda p: p) if prefix == "." else (lambda p: f"{prefix}/{p}")
+            from_repo = (lambda r: r) if prefix == "." else (lambda r: r[len(prefix) + 1:])
+        else:
+            # nested repo below the code dir: strip its own prefix instead
+            prefix = os.path.relpath(repo, code_dir).replace(os.sep, "/")
+            to_repo = lambda p: p[len(prefix) + 1:] if p.startswith(prefix + "/") else p
+            from_repo = lambda r: f"{prefix}/{r}"
+        tracked = {t for t in run_git(["ls-files", "--cached", "-z"], repo).split("\0") if t}
+        out = run_git_stdin(["check-ignore", "-z", "--stdin"], repo, "\0".join(to_repo(p) for p in rels))
+        for line in out.split("\0"):
+            line = line.strip()
+            if line and line not in tracked:
+                excluded.add(from_repo(line))
+    return excluded
 
 
 def display_path(rel: str) -> str:
