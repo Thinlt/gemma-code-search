@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`code-search index` failed with `TypeError: main() takes 0 positional arguments but 1 was given`.**
+  The single-command refactor changed how `cli.py` and `search.py` call the indexer, but `index.py`
+  itself was never converted — it kept the old no-argument `main()` and lost the enclosing-repo
+  ignore fix along with it. `index.py` is restored and `tests/test_cli_contract.py` now pins the
+  router↔engine seam so a half-applied refactor fails CI.
+- **Two startup warnings that looked like errors.** `uv` printed `VIRTUAL_ENV … does not match the
+  project environment path` whenever another venv was activated (the shim and `install.sh` now pass
+  `--no-active`), and importing the model stack printed torch's `NOTE: Redirects are currently not
+  supported in MacOs` on every run (`scripts/quiet_logs.py` raises that one logger above WARNING).
 - **Indexed files inside a nested git repository that the enclosing repository ignores.**
   Ignore rules were checked against the file's *nearest* repository only, and a repository
   cannot ignore its own root — so a directory such as `ECC/` listed in the outer `.gitignore`

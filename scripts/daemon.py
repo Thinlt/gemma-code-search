@@ -68,6 +68,9 @@ def load_model():
     global _model, _dim
     if _model is not None:
         return _model
+    from quiet_logs import silence_import_warnings
+
+    silence_import_warnings()
     import torch
     from sentence_transformers import SentenceTransformer
     from transformers import logging as hf_logging

@@ -50,6 +50,7 @@ checkout.
 | `scripts/chunker.py` | Tree-sitter parsing and AST-aware chunk splitting |
 | `scripts/cli.py` | `code-search` entry point: subcommand routing, help, daemon ops |
 | `scripts/repo_ignore.py` | git-ignore filtering, including directories hidden by an enclosing repo |
+| `scripts/quiet_logs.py` | Mutes the known-harmless import-time warnings of the torch/ST stack |
 | `scripts/index.py` | Indexing implementation: checkpointing, incremental/hash bookkeeping |
 | `scripts/search.py` | Search implementation |
 | `scripts/daemon.py` | Shared model process, request queue, BM25 + dense fusion |
@@ -78,13 +79,21 @@ and terse. `DESIGN.md` is the human-facing design record and is written in Tiế
 
 ## Tests and checks
 
-`tests/test_repo_ignore.py` covers git-ignore filtering — nested repositories hidden by an outer
-`.gitignore`, tracked files, non-git directories, and symlinked code dirs. It needs no embedding
-model, so it runs in seconds. Before opening a pull request, run:
+Two test files need no embedding model, so they run in seconds:
+
+- `tests/test_repo_ignore.py` — git-ignore filtering: nested repositories hidden by an outer
+  `.gitignore`, tracked files, non-git directories, and symlinked code dirs.
+- `tests/test_cli_contract.py` — the seam between `scripts/cli.py` and the `search`/`index`
+  engines (`build_parser()` / `run(args)` / `main(argv)`), plus the rule that importing either
+  engine must not pull in torch or sentence-transformers. Keep it that way: the speed of
+  `code-search --help` depends on it.
+
+Before opening a pull request, run:
 
 ```bash
 uvx ruff check scripts tests   # must be clean (config in scripts/pyproject.toml)
 python tests/test_repo_ignore.py
+python tests/test_cli_contract.py   # needs only numpy + tree_sitter
 ```
 
 Everything else is verified manually and end-to-end. Exercise the change against a real repository:

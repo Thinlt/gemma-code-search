@@ -64,7 +64,9 @@ if [ -t 0 ] || [ "${EMBEDDINGGEMMA_EDIT_GITIGNORE:-1}" = "1" ]; then
 fi
 
 if command -v uv >/dev/null 2>&1; then
-  exec uv run --project "$SCRIPTS" python "$SCRIPTS/cli.py" "$@"
+  # --no-active: if another venv is activated (VIRTUAL_ENV), uv otherwise prints a
+  # mismatch warning before every run; this shim always means the skill's own env.
+  exec uv run --project "$SCRIPTS" --no-active python "$SCRIPTS/cli.py" "$@"
 elif [ -x "$SCRIPTS/.venv/bin/python" ]; then
   exec "$SCRIPTS/.venv/bin/python" "$SCRIPTS/cli.py" "$@"
 else

@@ -138,7 +138,9 @@ done
 
 # ---- 1. venv: one uv-managed env inside scripts/ -------------------------
 echo "[install] uv sync (wheels cached; first run may download torch)..."
-( set -e; cd "$HERE/scripts" && uv sync )
+# --no-active: the skill owns scripts/.venv; an activated VIRTUAL_ENV elsewhere
+# only makes uv print a mismatch warning
+( set -e; cd "$HERE/scripts" && uv sync --no-active )
 
 echo "[install] venv ready: $HERE/scripts/.venv"
 

@@ -143,6 +143,7 @@ variable is documented in [SKILL.md](SKILL.md#environment-optional).
     ├── cli.py            # `code-search` entry point (search / index / daemon)
     ├── chunker.py        # tree-sitter AST chunking
     ├── repo_ignore.py    # git-ignore filtering (nested-repo aware)
+    ├── quiet_logs.py     # mutes harmless import-time warnings (torch/ST)
     ├── index.py          # index CLI implementation
     ├── search.py         # search CLI implementation
     ├── daemon.py         # shared model daemon + BM25/dense fusion

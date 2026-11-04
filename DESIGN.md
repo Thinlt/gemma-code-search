@@ -245,6 +245,22 @@ không cần biết subcommand nào đang chạy. `scripts/cli.py` định tuy�
 ~0.1s thay vì vài giây. `install.sh` tự gỡ shim `code-index` cũ nếu phát hiện nó
 do bản trước cài.
 
+Ranh giới giữa router và hai engine là một hợp đồng cố định — `scripts/cli.py`
+import module rồi gọi `search.build_parser()`/`search.main(argv)` và
+`index.build_parser()`/`index.run(args)`/`index.main(argv)`. `index.run(args)`
+là đường vào in-process cho lần reindex chạy trước mỗi search (thay cho
+subprocess trước đây), nên nó phải tồn tại song song với `main(argv)`.
+`tests/test_cli_contract.py` khoá hợp đồng này và chặn việc import
+torch/sentence-transformers quay lại module scope — đúng loại lỗi đã khiến
+`code-search index` crash sau khi gộp lệnh: `cli.py` đã gọi `main(argv)` trong
+khi `index.py` vẫn còn `main()` không tham số.
+
+Hai cảnh báo lúc khởi động được dập vì chúng trông như lỗi nhưng không phải:
+`uv` in `VIRTUAL_ENV … does not match …` khi có venv khác đang active (shim và
+`install.sh` truyền `--no-active`), và torch in `NOTE: Redirects are currently
+not supported in MacOs` mỗi lần import model stack (`scripts/quiet_logs.py`
+nâng riêng logger đó lên mức ERROR).
+
 ---
 
 ## 5. Nguyên tắc không được phá khi phát triển tiếp
@@ -260,6 +276,9 @@ do bản trước cài.
    trong nó là một git checkout riêng — repo con không thể tự ignore chính root của nó,
    nên chỉ hỏi repo gần nhất là sai. Chuỗi repo được hỏi: repo của file → repo bao nó →
    … → repo chứa code dir (không đi xa hơn).
+8. **Giữ hợp đồng router ↔ engine** (`build_parser()` / `run(args)` / `main(argv)`) và **giữ**
+   import torch/sentence-transformers ra khỏi module scope của `search.py`/`index.py`. Đổi một
+   bên mà quên bên kia là lỗi câm: `tests/test_cli_contract.py` tồn tại để bắt nó.
 
 ---
 

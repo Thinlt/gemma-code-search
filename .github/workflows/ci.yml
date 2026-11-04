@@ -45,6 +45,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: CLI contract (router ↔ engine seam, light imports)
+        run: |
+          # only the module-scope imports of index.py/search.py are needed here;
+          # torch and sentence-transformers must NOT be required
+          pip install --quiet numpy tree_sitter
+          python tests/test_cli_contract.py
+
       - name: git-ignore filtering (nested repos, tracked files, symlinked dirs)
         run: python tests/test_repo_ignore.py
 

@@ -21,17 +21,30 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set
 
 import numpy as np
-import torch
-from sentence_transformers import SentenceTransformer
-from transformers import logging as hf_logging
-
-hf_logging.disable_progress_bar()  # drop the "Loading weights" bar — noise in terminals and agent shells
 
 from chunker import EXT_TO_LANG, CodeChunk, chunk_file
 from onnx_embedder import encoder_id
+from repo_ignore import gitignore_excluded
+
+if TYPE_CHECKING:  # heavy imports stay out of `--help` and of lightweight callers
+    from sentence_transformers import SentenceTransformer
+
+
+def _torch():
+    """Import torch on first use. Importing it costs seconds, and the CLI must be
+    able to print `--help` (and reach an up-to-date error message) without it."""
+    global _TORCH
+    if _TORCH is None:
+        import torch
+
+        _TORCH = torch
+    return _TORCH
+
+
+_TORCH = None
 
 SUPPORTED_EXTS = set(EXT_TO_LANG.keys()) | {".md"}
 # Embedder input cap in tokens. The model's tokenizer reports model_max_length=1e18,
@@ -121,62 +134,6 @@ def subdir_scope(subdir: str, all_files: Dict[str, Path]) -> Set[str]:
         sub = sub[2:]
     sub = sub.rstrip("/")
     return {p for p in all_files if p == sub or p.startswith(sub + "/")}
-
-
-def run_git_stdin(cmd: List[str], cwd: str, input_text: str) -> str:
-    try:
-        r = subprocess.run(["git"] + cmd, cwd=cwd, input=input_text, capture_output=True, text=True)
-        return r.stdout
-    except Exception:
-        return ""
-
-
-def governing_repos(code_dir: str, files: Dict[str, Path]) -> Dict[str, str]:
-    """rel path → nearest git repo root at/above the file ('' when none). Cached per directory."""
-    cache: Dict[str, str] = {}
-    out: Dict[str, str] = {}
-    for rel in files:
-        d = str(Path(rel).parent)
-        if d not in cache:
-            cur = Path(code_dir, d).resolve()
-            cache[d] = next((str(a) for a in (cur, *cur.parents) if (a / ".git").exists()), "")
-        out[rel] = cache[d]
-    return out
-
-
-def gitignore_excluded(code_dir: str, files: Dict[str, Path]) -> Set[str]:
-    """Rel paths excluded by .gitignore rules with full git semantics (nested
-    .gitignore, .git/info/exclude, negation, '**'); tracked files are never
-    excluded. Empty set when git or a repo is unavailable — non-git dirs are
-    left untouched by design."""
-    by_repo: Dict[str, List[str]] = {}
-    for rel, repo in governing_repos(code_dir, files).items():
-        if repo:
-            by_repo.setdefault(repo, []).append(rel)
-    if not by_repo:
-        return set()
-
-    excluded: Set[str] = set()
-    code_p = Path(code_dir)
-    for repo, rels in sorted(by_repo.items()):
-        repo_p = Path(repo)
-        if repo_p == code_p or repo_p in code_p.parents:
-            # repo at/above the code dir: file paths sit under a prefix relative to the repo
-            prefix = os.path.relpath(code_dir, repo).replace(os.sep, "/")
-            to_repo = (lambda p: p) if prefix == "." else (lambda p: f"{prefix}/{p}")
-            from_repo = (lambda r: r) if prefix == "." else (lambda r: r[len(prefix) + 1:])
-        else:
-            # nested repo below the code dir: strip its own prefix instead
-            prefix = os.path.relpath(repo, code_dir).replace(os.sep, "/")
-            to_repo = lambda p: p[len(prefix) + 1:] if p.startswith(prefix + "/") else p
-            from_repo = lambda r: f"{prefix}/{r}"
-        tracked = {t for t in run_git(["ls-files", "--cached", "-z"], repo).split("\0") if t}
-        out = run_git_stdin(["check-ignore", "-z", "--stdin"], repo, "\0".join(to_repo(p) for p in rels))
-        for line in out.split("\0"):
-            line = line.strip()
-            if line and line not in tracked:
-                excluded.add(from_repo(line))
-    return excluded
 
 
 def display_path(rel: str) -> str:
@@ -275,6 +232,7 @@ def start_stop_listener() -> Optional[Callable[[], None]]:
 def resolve_device() -> str:
     if DEVICE_ENV not in ("auto", ""):
         return DEVICE_ENV
+    torch = _torch()
     if torch.cuda.is_available():
         return "cuda"
     try:
@@ -291,14 +249,15 @@ def resolve_dtype(device: str):
     and fp16 yields non-finite embeddings (Gemma activation overflow)."""
     d = DTYPE_ENV
     if d in ("fp32", "float32", "float"):
-        return torch.float32
+        return _torch().float32
     if d in ("bf16", "bfloat16"):
-        return torch.bfloat16
+        return _torch().bfloat16
     if d in ("fp16", "float16", "half"):
-        return torch.float16
+        return _torch().float16
     if device == "cuda":
+        torch = _torch()
         return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
-    return torch.float32
+    return _torch().float32
 
 
 def resolve_backend() -> str:
@@ -342,7 +301,7 @@ def resolve_backend() -> str:
     return "torch"
 
 
-def load_model(dim: int) -> SentenceTransformer:
+def load_model(dim: int) -> "SentenceTransformer":
     backend = resolve_backend()
     if backend in ("auto", "anemll"):
         from anemll_embedder import AnemllEmbedder, bundle_available
@@ -382,7 +341,14 @@ def load_model(dim: int) -> SentenceTransformer:
 
     device = resolve_device()
 
-    def build(dev: str, dtype) -> SentenceTransformer:
+    def build(dev: str, dtype) -> "SentenceTransformer":
+        from quiet_logs import silence_import_warnings
+
+        silence_import_warnings()
+        from sentence_transformers import SentenceTransformer
+        from transformers import logging as hf_logging
+
+        hf_logging.disable_progress_bar()  # drop the "Loading weights" bar — noise in terminals and agent shells
         m = SentenceTransformer(
             "google/embeddinggemma-2",
             device=dev,
@@ -392,7 +358,7 @@ def load_model(dim: int) -> SentenceTransformer:
         m.max_seq_length = MAX_SEQ_LEN
         return m
 
-    def self_check(m: SentenceTransformer) -> bool:
+    def self_check(m: "SentenceTransformer") -> bool:
         # cheap encode; catches dtype/device failures and non-finite output
         if m.device.type == "cpu":
             return True
@@ -406,6 +372,7 @@ def load_model(dim: int) -> SentenceTransformer:
             print(f"[warn] device {m.device.type} self-check failed ({e})")
             return False
 
+    torch = _torch()
     model = build(device, resolve_dtype(device))
     if not self_check(model):
         model = build(device, torch.float32)
@@ -416,7 +383,7 @@ def load_model(dim: int) -> SentenceTransformer:
     return model
 
 
-def embed_chunks(model: SentenceTransformer, chunks: List[CodeChunk], dim: int) -> np.ndarray:
+def embed_chunks(model: "SentenceTransformer", chunks: List[CodeChunk], dim: int) -> np.ndarray:
     if not chunks:
         return np.zeros((0, dim), dtype=np.float32)
     texts = [c.full_text for c in chunks]
@@ -427,35 +394,101 @@ def embed_chunks(model: SentenceTransformer, chunks: List[CodeChunk], dim: int) 
     return np.array(emb, dtype=np.float32)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="EmbeddingGemma code indexer")
-    parser.add_argument("--force", action="store_true", help="Full rebuild")
-    parser.add_argument("--working-tree", action="store_true", help="Also reindex dirty/uncommitted files")
-    parser.add_argument("--paths", nargs="*", default=None, help="Only reindex these relative paths")
-    parser.add_argument(
-        "--commit-only",
-        action="store_true",
-        help="Only reindex files changed since last indexed commit; never resume a backlog "
-        "of unindexed files (used by search auto-reindex — resume stays an explicit run)",
+def build_parser() -> argparse.ArgumentParser:
+    """Parser for the index command, reachable as `code-search index`."""
+    parser = argparse.ArgumentParser(
+        prog="code-search index",
+        description=(
+            "Build or update the semantic index for a repository.\n"
+            "By default only files changed since the last indexed commit are re-embedded;"
+            " uncommitted edits stay out until you ask for them with --paths or --working-tree."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  code-search index                       # incremental: re-embed files changed since the last commit
+  code-search index --force               # rebuild everything from scratch
+  code-search index --working-tree        # also index uncommitted edits
+  code-search index --paths src/auth.mjs  # reindex just the files you edited
+  code-search index --subdir services/api # index one subtree into the shared index
+  code-search index --force --subdir api  # rebuild one subtree, keep the rest
+
+progress and recovery:
+  Ctrl-C or 'q' saves a checkpoint; rerun the same command to resume.
+  'q' exits 0 — that is a stop, not a failure.
+
+the index is queried with:
+  code-search "your query"
+""",
     )
-    parser.add_argument(
+    mode_group = parser.add_argument_group("what to index")
+    mode_group.add_argument(
+        "--force",
+        action="store_true",
+        help="rebuild from scratch instead of updating incrementally",
+    )
+    mode_group.add_argument(
+        "--working-tree",
+        action="store_true",
+        help="also index uncommitted (dirty) files",
+    )
+    mode_group.add_argument(
+        "--paths",
+        nargs="*",
+        default=None,
+        metavar="FILE",
+        help="reindex only these files, relative to the code dir",
+    )
+    mode_group.add_argument(
         "--subdir",
         default=None,
-        help="Only index files under this directory (relative to --code-dir), into the shared index",
+        metavar="DIR",
+        help="index only files under this directory, into the shared index",
     )
-    parser.add_argument("--code-dir", default=os.getenv("CODE_DIR", "."))
-    parser.add_argument(
+    mode_group.add_argument(
+        "--commit-only",
+        action="store_true",
+        help="limit updates to files changed since the last indexed commit; never resume a "
+        "backlog of unindexed files (used by the reindex that runs before a search)",
+    )
+
+    location_group = parser.add_argument_group("where")
+    location_group.add_argument(
+        "--code-dir",
+        default=os.getenv("CODE_DIR", "."),
+        metavar="PATH",
+        help="repository to index (default: the git repo containing the current directory)",
+    )
+    location_group.add_argument(
         "--index-dir",
         default=None,
-        help="Directory for .code_index (default: <code_dir>/.code_index if code_dir != '.', else ./ .code_index)",
+        metavar="PATH",
+        help="where the index lives (default: <code-dir>/.code_index)",
     )
-    parser.add_argument("--dim", type=int, default=int(os.getenv("TRUNCATE_DIM", "512")))
-    parser.add_argument("--quiet", action="store_true")
-    args = parser.parse_args()
+    location_group.add_argument(
+        "--dim",
+        type=int,
+        default=int(os.getenv("TRUNCATE_DIM", "512")),
+        metavar="N",
+        help="embedding dimension: 768, 512, 256 or 128 (default: 512)",
+    )
+
+    output_group = parser.add_argument_group("output")
+    output_group.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress progress output (used by the reindex before a search)",
+    )
+    return parser
+
+
+def run(args: argparse.Namespace) -> None:
+    """Execute an index run for already-parsed arguments (shared by the CLI and
+    the reindex triggered before a search)."""
     code_dir_resolved = Path(args.code_dir).resolve()
     if not code_dir_resolved.is_dir():
-        parser.error(
-            f"--code-dir must be an existing directory (resolved from cwd), got a file or missing path: {code_dir_resolved}"
+        raise SystemExit(
+            f"[error] --code-dir must be an existing directory (resolved from cwd), "
+            f"got a file or missing path: {code_dir_resolved}"
         )
     # Resolve index-dir relative to code-dir: if code_dir is not '.', index-dir defaults to <code_dir>/.code_index
     code_dir = os.path.abspath(args.code_dir)
@@ -469,6 +502,10 @@ def main() -> None:
     finally:
         if restore_term is not None:
             restore_term()
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    run(build_parser().parse_args(argv))
 
 
 def _run(args: argparse.Namespace) -> None:
@@ -507,7 +544,7 @@ def _run(args: argparse.Namespace) -> None:
                 # mixed index (or shrink it to the scope) — only a full rebuild is safe
                 sys.exit(
                     f"[error] {incompatible}; cannot update this index in place — "
-                    "full rebuild first: python scripts/index.py --force"
+                    "full rebuild first: code-search index --force"
                 )
             # stale vectors cannot be merged with new ones — rebuild from scratch
             print(f"[index-format] {incompatible} — rebuilding from scratch")
@@ -570,7 +607,7 @@ def _run(args: argparse.Namespace) -> None:
             # an interrupted/partial build must not be resumed by search — surface it instead
             print(
                 f"[partial-index] {backlog} file(s) on disk are not in the index "
-                f"(interrupted build or partial scope) — finish with: python scripts/index.py",
+                f"(interrupted build or partial scope) — finish with: code-search index",
                 file=sys.stderr,
             )
         if not args.quiet:
@@ -788,13 +825,13 @@ def _run(args: argparse.Namespace) -> None:
         # 'q' pressed: everything completed so far is checkpointed; exit cleanly (not an error)
         print(
             f"[stopped] saved: chunks={len(final_docs)} files_hashed={len(new_hashes)} "
-            f"— resume with: python scripts/index.py"
+            f"— resume with: code-search index"
         )
         return
     if not args.quiet:
         print(f"Done. chunks={len(final_docs)} commit={current_commit[:10]} dirty_files={len(dirty_now)}")
         if dirty_now and not args.working_tree:
-            print("Note: dirty (uncommitted) files were NOT reindexed. Agent can run: python scripts/index.py --paths <file> ...")
+            print("Note: dirty (uncommitted) files were NOT reindexed. Agent can run: code-search index --paths <file> ...")
 
 
 if __name__ == "__main__":
