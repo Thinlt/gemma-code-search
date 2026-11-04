@@ -146,7 +146,7 @@ variable is documented in [SKILL.md](SKILL.md#environment-optional).
 
 ## Troubleshooting
 
-**`error: embeddinggemma-code-search not found`** — set `EMBEDDINGGEMMA_HOME` to the clone directory,
+**`error: gemma-code-search not found`** — set `EMBEDDINGGEMMA_HOME` to the clone directory,
 or re-run `./install.sh`.
 
 **`_encoder mismatch_` warning** — the index was built with a different backend (torch vs ONNX int8).

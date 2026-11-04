@@ -278,11 +278,13 @@ Mọi mở rộng nên kiểm tra lại mục 5 (đặc biệt collision cũ–m
 
 - Repo chính thức: **[Thinlt/gemma-code-search](https://github.com/Thinlt/gemma-code-search)** —
   repo standalone, chứa toàn bộ skill (code, `install.sh`, shim, tài liệu).
-- Lịch sử phát triển được tách từ monorepo `Thinlt/Grok` (thư mục `embeddinggemma-code-search/`)
+- Lịch sử phát triển được tách từ monorepo `Thinlt/Grok` (thư mục cũ `embeddinggemma-code-search/`)
   bằng `git subtree split`, nên các commit gốc vẫn còn.
-- Tên kỹ thuật bên trong (tên skill `embeddinggemma-code-search`, biến môi trường
-  `EMBEDDINGGEMMA_*`, thư mục index `.code_index/`) **giữ nguyên** để không phá vỡ cài đặt
-  và shim đang có trên máy người dùng.
+- **Tên skill là `gemma-code-search`** (đổi từ `embeddinggemma-code-search`). Biến môi trường
+  `EMBEDDINGGEMMA_*` và thư mục index `.code_index/` **giữ nguyên** để không phá vỡ cấu hình,
+  index và daemon đang có trên máy người dùng.
+- Shim nhận **cả hai tên thư mục** (`gemma-code-search` trước, `embeddinggemma-code-search` sau)
+  và cả frontmatter cũ, nên bản cài cũ vẫn chạy; `install.sh` tự gỡ symlink đăng ký cũ khi cài lại.
 - Các harness (`Claude Code`, `Cursor`, `Antigravity`, `opencode`, `Gemini CLI`) tìm skill theo
   `SKILL.md`; `install.sh` đọc `name:` trong frontmatter nên đổi tên thư mục không làm hỏng đăng ký.
 

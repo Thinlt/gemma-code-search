@@ -12,16 +12,20 @@ resolve_skill() {
   d="$PWD"
   while [ -n "$d" ] && [ "$d" != "/" ]; do
     for candidates in ".claude" ".cursor" ".agents" ".config/opencode" ".gemini"; do
-      home="$d/$candidates/skills/embeddinggemma-code-search"
-      if [ -f "$home/scripts/index.py" ]; then
-        echo "$home"
-        return
-      fi
+      # canonical name first, then the pre-rename name (older installs)
+      for name in gemma-code-search embeddinggemma-code-search; do
+        home="$d/$candidates/skills/$name"
+        if [ -f "$home/scripts/index.py" ]; then
+          echo "$home"
+          return
+        fi
+      done
       # renamed copies: any skills/* dir carrying this skill's SKILL.md
       for home in "$d/$candidates"/skills/*/; do
         [ -f "${home}scripts/index.py" ] || continue
         [ -f "${home}SKILL.md" ] || continue
-        if grep -iq '^name: .*embeddinggemma' "${home}SKILL.md"; then
+        # match both the current and the pre-rename skill name
+        if grep -Eiq '^name: *(gemma-code-search|.*embeddinggemma)' "${home}SKILL.md"; then
           echo "${home%/}"
           return
         fi
@@ -34,7 +38,7 @@ resolve_skill() {
 
 SKILL="$(resolve_skill)"
 SCRIPTS="$SKILL/scripts"
-[ -d "$SCRIPTS" ] || { echo "error: embeddinggemma-code-search not found (set EMBEDDINGGEMMA_HOME)" >&2; exit 1; }
+[ -d "$SCRIPTS" ] || { echo "error: gemma-code-search not found (set EMBEDDINGGEMMA_HOME)" >&2; exit 1; }
 
 CODE_DIR="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)"
 

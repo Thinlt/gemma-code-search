@@ -1,5 +1,5 @@
 ---
-name: embeddinggemma-code-search
+name: gemma-code-search
 description: Fast semantic code search with Google EmbeddingGemma-2, tree-sitter AST chunking (Python, JS, JSX, TS, Go, Rust, PHP), shared model daemon, and commit-based incremental index. Use when finding functions, methods, classes, or logic by meaning — e.g. "where is rate limiting", "find refresh token", "auth middleware".
 ---
 
@@ -125,7 +125,7 @@ uv run --project <skill-dir>/scripts python <skill-dir>/scripts/daemon.py --stop
 ```
 
 (`<skill-dir>` is where the skill is installed — resolve it like the shims do:
-`EMBEDDINGGEMMA_HOME` → walk-up `.claude|.cursor|.agents/skills/embeddinggemma-code-search`.)
+`EMBEDDINGGEMMA_HOME` → walk-up `.claude|.cursor|.agents/skills/gemma-code-search`.)
 
 Idle default: **900s** (15 min). Override with `EMBEDDINGGEMMA_IDLE_SEC`.
 
@@ -158,7 +158,7 @@ cd gemma-code-search
   `.claude/|.cursor/|.agents/skills/` — lets a repo commit/carry the skill
   registration; the venv, models, and daemon stay shared and global.
 - The shims resolve the skill at run time: `EMBEDDINGGEMMA_HOME` → nearest
-  `.claude|.cursor|.agents/skills/embeddinggemma-code-search` up the tree →
+  `.claude|.cursor|.agents/skills/gemma-code-search` up the tree →
   baked-in global home. Copy (not symlink) the skill somewhere and point
   `EMBEDDINGGEMMA_HOME` at it to pin a different copy.
 
@@ -208,8 +208,8 @@ Harness discovery dirs — global (`~/.claude/...`) or per-project (repo-relativ
 
 | Harness | Path |
 |---------|------|
-| Cursor | `.cursor/skills/embeddinggemma-code-search/` |
-| Claude Code | `.claude/skills/embeddinggemma-code-search/` |
-| Antigravity | `.agents/skills/embeddinggemma-code-search/` |
+| Cursor | `.cursor/skills/gemma-code-search/` |
+| Claude Code | `.claude/skills/gemma-code-search/` |
+| Antigravity | `.agents/skills/gemma-code-search/` |
 
 The skill folder may be a symlink to one canonical copy (recommended).

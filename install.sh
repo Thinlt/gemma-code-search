@@ -1,5 +1,5 @@
 #!/bin/bash
-# install.sh — bootstrap the embeddinggemma-code-search skill.
+# install.sh — bootstrap the gemma-code-search skill.
 #
 #   ./install.sh                                    # venv (uv sync) + shims in ~/.local/bin
 #   ./install.sh --skills-global                    # + register for ALL known agents
@@ -9,7 +9,7 @@
 #
 # Shim resolution order at run time:
 #   1. EMBEDDINGGEMMA_HOME env override
-#   2. nearest .claude|.cursor|.agents/skills/embeddinggemma-code-search up the tree
+#   2. nearest .claude|.cursor|.agents/skills/{gemma-code-search,embeddinggemma-code-search} up the tree
 #   3. baked-in global skill home (this repo)
 set -euo pipefail
 
@@ -17,7 +17,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 # skill name follows the frontmatter in SKILL.md (survives folder renames)
 SKILL_NAME="$(grep -m1 '^name:' "$HERE/SKILL.md" | sed 's/^name:[[:space:]]*//' | xargs)"
-SKILL_NAME="${SKILL_NAME:-embeddinggemma-code-search}"
+SKILL_NAME="${SKILL_NAME:-gemma-code-search}"
+# pre-rename name: stale registrations under this name are cleaned up on install
+LEGACY_SKILL_NAME="${LEGACY_SKILL_NAME:-embeddinggemma-code-search}"
 
 # agent name -> global skills dir (project variants are the same path under the project root)
 AGENT_DIRS=(
@@ -150,6 +152,14 @@ echo "[install] shims: $BIN_DIR/code-search, $BIN_DIR/code-index"
 # ---- 3. harness registration --------------------------------------------
 register() { # register <skills-dir>
   mkdir -p "$1"
+  # drop a stale registration left by the pre-rename release — only if it still
+  # points at a copy of this skill (never remove a user's unrelated dir)
+  if [ "$LEGACY_SKILL_NAME" != "$SKILL_NAME" ] && [ -L "$1/$LEGACY_SKILL_NAME" ]; then
+    if [ -f "$1/$LEGACY_SKILL_NAME/scripts/search.py" ]; then
+      rm -f "$1/$LEGACY_SKILL_NAME"
+      echo "[install] removed legacy link $1/$LEGACY_SKILL_NAME"
+    fi
+  fi
   ln -sfn "$HERE" "$1/$SKILL_NAME"
   echo "[install] linked $1/$SKILL_NAME -> $HERE"
 }
