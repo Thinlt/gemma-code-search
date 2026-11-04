@@ -93,7 +93,7 @@ code-index                     # commit-only incremental (same as the auto step 
 code-index --force             # full rebuild
 code-index --paths src/auth.py # reindex specific files (the agent-controlled path)
 code-index --working-tree      # include uncommitted dirty files
-code-index --subdir app/api    # index one subtree into the shared index
+code-index --subdir services/api    # index one subtree into the shared index
 ```
 
 ### Agent workflow
