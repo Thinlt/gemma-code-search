@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Skill renamed `embeddinggemma-code-search` → `gemma-code-search` (frontmatter `name:` and the
+  registration folder). The `EMBEDDINGGEMMA_*` environment variables, the `.code_index/` directory
+  and the `code-search` / `code-index` commands are unchanged. Shims still resolve the pre-rename
+  folder and frontmatter, and `install.sh` removes a stale legacy registration when it re-points it.
 - `README.md` is now a standalone project README (previously scoped to the monorepo).
 - `DESIGN.md` §8 records this repository as the canonical source.
 

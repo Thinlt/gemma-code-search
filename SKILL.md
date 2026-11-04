@@ -3,7 +3,7 @@ name: gemma-code-search
 description: Fast semantic code search with Google EmbeddingGemma-2, tree-sitter AST chunking (Python, JS, JSX, TS, Go, Rust, PHP), shared model daemon, and commit-based incremental index. Use when finding functions, methods, classes, or logic by meaning — e.g. "where is rate limiting", "find refresh token", "auth middleware".
 ---
 
-# EmbeddingGemma Code Search
+# Gemma Code Search
 
 Semantic search over the codebase with:
 

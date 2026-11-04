@@ -1,4 +1,4 @@
-# Design document — EmbeddingGemma Code Search
+# Design document — Gemma Code Search
 
 Tài liệu này ghi lại **ý đồ thiết kế đã chốt** của skill semantic code search, để người mới đọc hiểu bối cảnh, ràng buộc, và hướng phát triển tiếp.
 
