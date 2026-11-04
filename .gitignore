@@ -1,8 +1,22 @@
+# Indexes and caches produced by the skill
 .code_index/
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+
+# Virtual environments
 .venv/
 venv/
-*.egg-info/
-.DS_Store
+env/
+
+# Model bundles (downloaded / exported, never committed)
 models/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local scratch
+*.log

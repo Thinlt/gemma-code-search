@@ -1,7 +1,9 @@
 [project]
-name = "embeddinggemma-code-search"
+name = "gemma-code-search"
 version = "0.1.0"
-description = "EmbeddingGemma-2 semantic code search (index, search, daemon)"
+description = "Semantic code search (EmbeddingGemma-2 + tree-sitter) for coding agents — index, search, daemon"
+readme = "../README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "sentence-transformers>=3.0.0",
@@ -20,7 +22,25 @@ dependencies = [
     "rank-bm25>=0.2.2",
 ]
 
-[tool.uv]
 # optional int8 ONNX backend group: uv sync --extra onnx
 [project.optional-dependencies]
 onnx = ["onnxruntime", "onnx", "onnxscript"]
+
+# dev tooling: ruff lint/format, pyflakes checks
+[dependency-groups]
+dev = ["ruff>=0.6"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = [".venv", "models"]
+
+[tool.ruff.lint]
+# Errors only: pyflakes (F) plus syntax/undefined-name checks (E9). The existing
+# scripts predate a formatter, so the wider pycodestyle/pyupgrade families are
+# deliberately not enabled — `ruff check` must stay green for CI to be meaningful.
+# See CONTRIBUTING.md before broadening this list.
+select = ["E9", "F"]
