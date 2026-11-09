@@ -5,6 +5,7 @@ chunking, and a shared model daemon.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![M8ven Score](https://m8ven.ai/badge/mcp/thinlt-gemma-code-search-1of2up?v=ddf87760f23c6ea9bcb823184395ad81)](https://m8ven.ai/mcp/thinlt-gemma-code-search-1of2up?s=readme)
 
 Ask for behavior, not for strings:
 
